@@ -1,0 +1,49 @@
+// Test: comments, if/else, boolean logic, while, modulo
+public class Main {
+    public static void main() {
+        // Line comment test - this should be ignored
+        
+        /* Block comment test
+           This whole block should be ignored too */
+        
+        // Test if/else if/else
+        int x = 15;
+        if (x > 20) {
+            println("big");
+        } else if (x > 10) {
+            println("medium");  // expected
+        } else {
+            println("small");
+        }
+
+        // Test boolean logic: && and ||
+        bool a = true;
+        bool b = false;
+        if (a && !b) {
+            println("a=true, b=false");  // expected
+        }
+        if (a || b) {
+            println("at least one true");  // expected
+        }
+        if (!b) {
+            println("b is false");  // expected
+        }
+
+        // Test while loop
+        int count = 0;
+        while (count < 5) {
+            println("while: " + count);
+            count = count + 1;
+        }
+
+        // Test modulo
+        int rem = 17 % 5;
+        println("17 % 5 = " + rem);  // expected: 2
+
+        // Test nested if with logic
+        int y = 7;
+        if (y > 0 && y < 10) {
+            println("y is single-digit positive");  // expected
+        }
+    }
+}

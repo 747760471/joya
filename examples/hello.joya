@@ -1,0 +1,16 @@
+public class Main {
+    public static void main() {
+        chan<int> ch = new chan<int>(2);
+        go {
+            for (int i = 0; i < 3; i++) {
+                send(ch, i * 10);
+                println("sent: " + (i * 10));
+            }
+            close(ch);
+        };
+        for (int i = 0; i < 3; i++) {
+            int val = receive(ch);
+            println("received: " + val);
+        }
+    }
+}

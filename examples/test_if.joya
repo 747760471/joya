@@ -1,0 +1,11 @@
+// Minimal test: if/else
+public class Main {
+    public static void main() {
+        int x = 15;
+        if (x > 10) {
+            println("x > 10");
+        } else {
+            println("x <= 10");
+        }
+    }
+}
