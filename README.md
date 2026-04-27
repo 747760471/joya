@@ -33,20 +33,29 @@ Java developers shouldn't have to learn a completely new syntax just to get goro
 
 ### Phase 1: Interpreter Prototype — Complete
 
-A fully working tree-walking interpreter that validates Joya's syntax and concurrency semantics.
+A fully working tree-walking interpreter with arrays, objects, method calls, and concurrency.
 
 | Feature | Status |
 |---------|--------|
-| Lexer (25+ keywords, operators, comments) | ✅ |
-| Recursive descent parser (precedence climbing) | ✅ |
-| AST (Expression, Statement, Method, Class, Program) | ✅ |
-| Tree-walking interpreter | ✅ |
-| `go {}` goroutines (OS threads, deep-copied environment) | ✅ |
-| `chan<T>` buffered channels (mutex + condvar) | ✅ |
-| Control flow: `for`, `while`, `if/else if/else`, `return` | ✅ |
-| Boolean logic: `&&`, `\|\|`, `!` (short-circuit) | ✅ |
-| Comments: `//` line, `/* */` nested block | ✅ |
-| Memory management: Arena + ThreadSafeAlloc, zero leaks | ✅ |
+| **Lexer** (28+ keywords, operators, comments) | ✅ |
+| **Recursive descent parser** (precedence climbing) | ✅ |
+| **AST** (Expression, Statement, Method, Class, Program) | ✅ |
+| **Tree-walking interpreter** | ✅ |
+| **Data types**: int, string, bool, float, arrays, objects, chan | ✅ |
+| **Arrays**: `new int[5]`, `[1,2,3]` literals, `arr[i]`, `arr.length` | ✅ |
+| **For-each**: `for (int x : arr) { ... }` | ✅ |
+| **String ops**: `s.length`, `s[0]`, string comparison, concatenation | ✅ |
+| **Methods**: parameters, return values, nested calls | ✅ |
+| **Classes**: fields, constructors, `this`, `new ClassName(args)` | ✅ |
+| **Method calls**: `obj.method(args)` with `this` binding | ✅ |
+| **null value**: `null` literal, `== null` comparison | ✅ |
+| **Control flow**: `for`, `while`, `for-each`, `if/else if/else`, `return`, `break`, `continue` | ✅ |
+| **Boolean logic**: `&&`, `\|\|`, `!` (short-circuit) | ✅ |
+| **Arithmetic**: int/float mixed ops, `%` modulo | ✅ |
+| **`go {}` goroutines** (OS threads, deep-copied environment) | ✅ |
+| **`chan<T>` buffered channels** (mutex + condvar, send/receive/close) | ✅ |
+| **Comments**: `//` line, `/* */` nested block | ✅ |
+| **Memory management**: Arena + ThreadSafeAlloc, zero leaks | ✅ |
 
 ### Roadmap
 
@@ -59,7 +68,7 @@ A fully working tree-walking interpreter that validates Joya's syntax and concur
 
 ---
 
-## 💻 Example
+## 💻 Examples
 
 ### Goroutines + Channels
 
@@ -90,6 +99,62 @@ sent: 10     received: 10
 sent: 20     received: 20
 ```
 
+### Arrays & For-Each
+
+```java
+int[] nums = [10, 20, 30, 40, 50];
+for (int n : nums) {
+    println(n);
+}
+println("length: " + nums.length);
+```
+
+### Classes & Objects
+
+```java
+class Calculator {
+    int value;
+
+    void Calculator(int v) {
+        this.value = v;
+    }
+
+    int add(int x) {
+        this.value = this.value + x;
+        return this.value;
+    }
+}
+
+Calculator calc = new Calculator(10);
+println(calc.add(5));      // 15
+println(calc.value);       // 15
+```
+
+### Concurrent Sorting
+
+```java
+public class Main {
+    public static void main() {
+        int[] data = [64, 34, 25, 12, 22, 11, 90, 45, 78, 33];
+
+        // Parallel partial sum via goroutines + channels
+        chan<int> ch = new chan<int>(2);
+        go {
+            send(ch, partialSum(data, 0, 5));
+        };
+        go {
+            send(ch, partialSum(data, 5, 10));
+        };
+        println("Sum: " + (receive(ch) + receive(ch)));
+
+        bubbleSort(data);
+    }
+
+    static int partialSum(int[] arr, int start, int end) { ... }
+    static void bubbleSort(int[] arr) { ... }
+}
+```
+
 ### Language Features at a Glance
 
 ```java
@@ -100,6 +165,7 @@ public class Main {
         string name = "Joya";
         bool ready = true;
         float pi = 3.14;
+        int[] arr = new int[5];
         chan<int> ch = new chan<int>(10);
 
         // Control flow
@@ -111,21 +177,27 @@ public class Main {
             println("small");
         }
 
-        // Boolean logic with short-circuit
-        if (ready && x > 0) {
-            println("ready and positive");
+        // Loops with break/continue
+        for (int i = 0; i < 10; i++) {
+            if (i % 2 == 0) continue;
+            if (i > 7) break;
+            println(i);  // 1 3 5 7
         }
 
-        // Loops
-        for (int i = 0; i < 5; i++) {
-            println("for: " + i);
-        }
-        while (x > 10) {
-            x = x - 1;
+        // For-each
+        string[] names = ["Alice", "Bob"];
+        for (string n : names) {
+            println(n);
         }
 
-        // Modulo
-        println("17 % 5 = " + 17 % 5);  // 2
+        // String operations
+        string s = "hello";
+        println(s.length);   // 5
+        println(s[0]);       // h
+
+        // null value
+        int val = null;
+        println(val == null);  // true
     }
 }
 ```
@@ -149,15 +221,23 @@ joya/
 ├── README.md              # English readme
 ├── README_CN.md           # Chinese readme
 ├── joya.md                # Language specification
+├── 修改记录.md             # Development changelog
 ├── src/
 │   ├── main.zig           # Entry point
-│   ├── lexer.zig          # Lexer
+│   ├── lexer.zig          # Lexer (28+ keywords)
 │   ├── ast.zig            # AST definitions
-│   ├── parser.zig         # Recursive descent parser
-│   └── interpreter.zig    # Interpreter (concurrency/channels/thread-safe)
+│   ├── parser.zig         # Recursive descent parser (precedence climbing)
+│   └── interpreter.zig    # Interpreter (objects, arrays, concurrency, channels)
 └── examples/
     ├── hello.joya         # Goroutines & channels
     ├── features.joya      # Feature showcase
+    ├── demo_sort.joya     # Concurrent sorting demo
+    ├── test_array.joya    # Array tests
+    ├── test_string.joya   # String tests
+    ├── test_method.joya   # Method call tests
+    ├── test_null.joya     # Null value tests
+    ├── test_break.joya    # break/continue tests
+    ├── test_class.joya    # Object & multi-class tests
     └── test_if.joya       # if/else test
 ```
 

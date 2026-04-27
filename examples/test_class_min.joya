@@ -1,0 +1,19 @@
+// Minimal test for this.field = expr
+class Simple {
+    int x;
+
+    void Simple(int v) {
+        this.x = v;
+    }
+
+    int getX() {
+        return this.x;
+    }
+}
+
+public class Main {
+    public static void main() {
+        Simple s = new Simple(42);
+        println(s.getX());
+    }
+}

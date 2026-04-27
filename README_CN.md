@@ -33,20 +33,29 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 
 ### 阶段一：解释器原型 — 已完成
 
-完整可运行的树遍历式解释器，验证了 Joya 的语法设计和并发语义。
+完整可运行的树遍历式解释器，支持数组、对象、方法调用和并发。
 
 | 功能 | 状态 |
 |------|------|
-| 词法分析器（25+ 关键字、运算符、注释） | ✅ |
-| 递归下降解析器（优先级爬升法） | ✅ |
-| AST（Expression、Statement、Method、Class、Program） | ✅ |
-| 树遍历式解释器 | ✅ |
-| `go {}` 协程（OS 线程，环境深拷贝） | ✅ |
-| `chan<T>` 带缓冲通道（mutex + condvar） | ✅ |
-| 控制流：`for`、`while`、`if/else if/else`、`return` | ✅ |
-| 布尔逻辑：`&&`、`\|\|`、`!`（短路求值） | ✅ |
-| 注释：`//` 行注释、`/* */` 嵌套块注释 | ✅ |
-| 内存管理：Arena + ThreadSafeAlloc，零泄漏 | ✅ |
+| **词法分析器**（28+ 关键字、运算符、注释） | ✅ |
+| **递归下降解析器**（优先级爬升法） | ✅ |
+| **AST**（Expression、Statement、Method、Class、Program） | ✅ |
+| **树遍历式解释器** | ✅ |
+| **数据类型**：int、string、bool、float、数组、对象、chan | ✅ |
+| **数组**：`new int[5]`、`[1,2,3]` 字面量、`arr[i]`、`arr.length` | ✅ |
+| **for-each**：`for (int x : arr) { ... }` | ✅ |
+| **字符串操作**：`s.length`、`s[0]`、字符串比较、拼接 | ✅ |
+| **方法**：参数传递、返回值、嵌套调用 | ✅ |
+| **类**：字段、构造函数、`this`、`new ClassName(args)` | ✅ |
+| **方法调用**：`obj.method(args)`，自动绑定 `this` | ✅ |
+| **null 值**：`null` 字面量、`== null` 比较 | ✅ |
+| **控制流**：`for`、`while`、`for-each`、`if/else if/else`、`return`、`break`、`continue` | ✅ |
+| **布尔逻辑**：`&&`、`\|\|`、`!`（短路求值） | ✅ |
+| **算术运算**：int/float 混合运算、`%` 取模 | ✅ |
+| **`go {}` 协程**（OS 线程，环境深拷贝） | ✅ |
+| **`chan<T>` 带缓冲通道**（mutex + condvar，send/receive/close） | ✅ |
+| **注释**：`//` 行注释、`/* */` 嵌套块注释 | ✅ |
+| **内存管理**：Arena + ThreadSafeAlloc，零泄漏 | ✅ |
 
 ### 路线图
 
@@ -90,6 +99,62 @@ sent: 10     received: 10
 sent: 20     received: 20
 ```
 
+### 数组与 for-each
+
+```java
+int[] nums = [10, 20, 30, 40, 50];
+for (int n : nums) {
+    println(n);
+}
+println("长度: " + nums.length);
+```
+
+### 类与对象
+
+```java
+class Calculator {
+    int value;
+
+    void Calculator(int v) {
+        this.value = v;
+    }
+
+    int add(int x) {
+        this.value = this.value + x;
+        return this.value;
+    }
+}
+
+Calculator calc = new Calculator(10);
+println(calc.add(5));      // 15
+println(calc.value);       // 15
+```
+
+### 并发排序
+
+```java
+public class Main {
+    public static void main() {
+        int[] data = [64, 34, 25, 12, 22, 11, 90, 45, 78, 33];
+
+        // 通过协程 + 通道并行求和
+        chan<int> ch = new chan<int>(2);
+        go {
+            send(ch, partialSum(data, 0, 5));
+        };
+        go {
+            send(ch, partialSum(data, 5, 10));
+        };
+        println("总和: " + (receive(ch) + receive(ch)));
+
+        bubbleSort(data);
+    }
+
+    static int partialSum(int[] arr, int start, int end) { ... }
+    static void bubbleSort(int[] arr) { ... }
+}
+```
+
 ### 语法一览
 
 ```java
@@ -100,6 +165,7 @@ public class Main {
         string name = "Joya";
         bool ready = true;
         float pi = 3.14;
+        int[] arr = new int[5];
         chan<int> ch = new chan<int>(10);
 
         // 控制流
@@ -111,21 +177,27 @@ public class Main {
             println("小");
         }
 
-        // 布尔逻辑（短路求值）
-        if (ready && x > 0) {
-            println("就绪且为正数");
+        // 循环与 break/continue
+        for (int i = 0; i < 10; i++) {
+            if (i % 2 == 0) continue;
+            if (i > 7) break;
+            println(i);  // 1 3 5 7
         }
 
-        // 循环
-        for (int i = 0; i < 5; i++) {
-            println("for: " + i);
-        }
-        while (x > 10) {
-            x = x - 1;
+        // for-each
+        string[] names = ["Alice", "Bob"];
+        for (string n : names) {
+            println(n);
         }
 
-        // 取模
-        println("17 % 5 = " + 17 % 5);  // 2
+        // 字符串操作
+        string s = "hello";
+        println(s.length);   // 5
+        println(s[0]);       // h
+
+        // null 值
+        int val = null;
+        println(val == null);  // true
     }
 }
 ```
@@ -152,13 +224,20 @@ joya/
 ├── 修改记录.md             # 开发修改记录
 ├── src/
 │   ├── main.zig           # 程序入口
-│   ├── lexer.zig          # 词法分析器
+│   ├── lexer.zig          # 词法分析器（28+ 关键字）
 │   ├── ast.zig            # AST 结构定义
-│   ├── parser.zig         # 递归下降解析器
-│   └── interpreter.zig    # 解释器核心（并发/通道/线程安全）
+│   ├── parser.zig         # 递归下降解析器（优先级爬升法）
+│   └── interpreter.zig    # 解释器核心（对象、数组、并发、通道）
 └── examples/
     ├── hello.joya         # 协程与通道示例
     ├── features.joya      # 特性展示
+    ├── demo_sort.joya     # 并发排序 Demo
+    ├── test_array.joya    # 数组测试
+    ├── test_string.joya   # 字符串测试
+    ├── test_method.joya   # 方法调用测试
+    ├── test_null.joya     # null 值测试
+    ├── test_break.joya    # break/continue 测试
+    ├── test_class.joya    # 对象与多类测试
     └── test_if.joya       # if/else 测试
 ```
 

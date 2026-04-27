@@ -26,6 +26,9 @@ pub const TokenType = enum {
     keyword_false,
     keyword_while,
     keyword_null,
+    keyword_break,
+    keyword_continue,
+    keyword_this,
 
     plus,
     minus,
@@ -100,6 +103,9 @@ pub const Lexer = struct {
         .{ "false", .keyword_false },
         .{ "while", .keyword_while },
         .{ "null", .keyword_null },
+        .{ "break", .keyword_break },
+        .{ "continue", .keyword_continue },
+        .{ "this", .keyword_this },
     });
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Lexer {

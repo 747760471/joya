@@ -69,7 +69,7 @@ pub const Parser = struct {
             self.check(.keyword_chan);
     }
 
-    /// Parse a base type without [] suffix (used by new T[size])
+    /// Parse a base type without [] suffix (used by new T[size] and type declarations)
     fn parseBaseType(self: *Parser) anyerror!ast.Type {
         if (self.check(.keyword_int)) { _ = self.advance(); return .int; }
         if (self.check(.keyword_string)) { _ = self.advance(); return .string; }
@@ -84,6 +84,11 @@ pub const Parser = struct {
             const chan_type = try self.allocator.create(ast.Type);
             chan_type.* = elem_type;
             return ast.Type{ .chan = chan_type };
+        }
+        // Class type: identifier used as type name
+        if (self.check(.identifier)) {
+            const name_tok = self.advance();
+            return ast.Type{ .class_ref = name_tok.value };
         }
         const tok = self.peek();
         std.debug.print("Parse error: expected type, got {} ('{s}') at line {}\n", .{ tok.typ, tok.value, tok.line });
@@ -240,6 +245,14 @@ pub const Parser = struct {
         // Null literal
         if (self.check(.keyword_null)) { _ = self.advance(); return ast.Expression{ .null_literal = {} }; }
 
+        // this reference
+        if (self.check(.keyword_this)) {
+            _ = self.advance();
+            var expr = ast.Expression{ .this_ref = {} };
+            expr = try self.parsePostfix(expr);
+            return expr;
+        }
+
         // new chan<T>(capacity)
         if (self.check(.keyword_new)) {
             _ = self.advance();
@@ -256,6 +269,26 @@ pub const Parser = struct {
                 return ast.Expression{
                     .new_chan = .{ .elem_type = elem_type, .capacity = capacity },
                 };
+            }
+            // new ClassName(args) — object creation (identifier followed by `(`)
+            if (self.check(.identifier)) {
+                // Lookahead: is next token `(` (object) or `[` (array of class type)?
+                if (self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].typ == .l_paren) {
+                    const class_name = self.advance();
+                    _ = try self.expect(.l_paren);
+                    var args = std.ArrayList(ast.Expression).init(self.allocator);
+                    if (!self.check(.r_paren)) {
+                        try args.append(try self.parseExpression());
+                        while (self.check(.comma)) {
+                            _ = self.advance();
+                            try args.append(try self.parseExpression());
+                        }
+                    }
+                    _ = try self.expect(.r_paren);
+                    return ast.Expression{
+                        .new_object = .{ .class_name = class_name.value, .args = try args.toOwnedSlice() },
+                    };
+                }
             }
             // new T[size] — array creation
             const elem_type = try self.parseBaseType();
@@ -373,13 +406,34 @@ pub const Parser = struct {
                 idx_ptr.* = index;
                 result = ast.Expression{ .array_index = .{ .array = arr_ptr, .index = idx_ptr } };
             }
-            // Field access: expr.field
+            // Method call or field access: expr.name(args) or expr.name
             else if (self.check(.dot)) {
                 _ = self.advance();
                 const field = try self.parseName();
-                const obj = try self.allocator.create(ast.Expression);
-                obj.* = result;
-                result = ast.Expression{ .field_access = .{ .object = obj, .field = field.value } };
+                // Method call: expr.method(args)
+                if (self.check(.l_paren)) {
+                    _ = self.advance();
+                    var args = std.ArrayList(ast.Expression).init(self.allocator);
+                    if (!self.check(.r_paren)) {
+                        try args.append(try self.parseExpression());
+                        while (self.check(.comma)) {
+                            _ = self.advance();
+                            try args.append(try self.parseExpression());
+                        }
+                    }
+                    _ = try self.expect(.r_paren);
+                    const obj = try self.allocator.create(ast.Expression);
+                    obj.* = result;
+                    result = ast.Expression{
+                        .method_call = .{ .object = obj, .method = field.value, .args = try args.toOwnedSlice() },
+                    };
+                }
+                // Field access: expr.field
+                else {
+                    const obj = try self.allocator.create(ast.Expression);
+                    obj.* = result;
+                    result = ast.Expression{ .field_access = .{ .object = obj, .field = field.value } };
+                }
             }
             else {
                 break;
@@ -397,8 +451,18 @@ pub const Parser = struct {
         if (self.check(.keyword_while)) return self.parseWhileLoop();
         if (self.check(.keyword_if)) return self.parseIfStmt();
         if (self.check(.keyword_return)) return self.parseReturnStmt();
+        if (self.check(.keyword_break)) return self.parseBreakStmt();
+        if (self.check(.keyword_continue)) return self.parseContinueStmt();
         if (self.check(.keyword_print) or self.check(.keyword_println)) return self.parsePrintStmt();
+        if (self.check(.keyword_this)) return self.parseThisAssignOrExpr();
         if (self.isTypeStart()) return self.parseVarDecl();
+        // Class-typed variable declaration: ClassName name = ...;
+        // Lookahead: identifier followed by another identifier
+        if (self.check(.identifier) and self.pos + 1 < self.tokens.len and
+            (self.tokens[self.pos + 1].typ == .identifier or self.tokens[self.pos + 1].typ == .keyword_main))
+        {
+            return self.parseVarDecl();
+        }
         if (self.check(.identifier)) return self.parseAssignOrExprStmt();
         // Built-in function calls as expression statements
         if (self.check(.keyword_send) or self.check(.keyword_receive) or self.check(.keyword_close)) {
@@ -718,6 +782,39 @@ pub const Parser = struct {
         return ast.Statement{ .return_stmt = expr };
     }
 
+    fn parseBreakStmt(self: *Parser) anyerror!ast.Statement {
+        _ = try self.expect(.keyword_break);
+        _ = try self.expect(.semicolon);
+        return ast.Statement{ .break_stmt = {} };
+    }
+
+    fn parseContinueStmt(self: *Parser) anyerror!ast.Statement {
+        _ = try self.expect(.keyword_continue);
+        _ = try self.expect(.semicolon);
+        return ast.Statement{ .continue_stmt = {} };
+    }
+
+    fn parseThisAssignOrExpr(self: *Parser) anyerror!ast.Statement {
+        _ = try self.expect(.keyword_this);
+        _ = try self.expect(.dot);
+        const field = try self.parseName();
+        // this.field = expr;
+        if (self.check(.eq)) {
+            _ = self.advance();
+            const value = try self.parseExpression();
+            _ = try self.expect(.semicolon);
+            return ast.Statement{ .this_assign = .{ .field = field.value, .value = value } };
+        }
+        // this.field as expression (or this.field.method() etc.)
+        var expr = ast.Expression{ .this_ref = {} };
+        const obj = try self.allocator.create(ast.Expression);
+        obj.* = expr;
+        expr = ast.Expression{ .field_access = .{ .object = obj, .field = field.value } };
+        expr = try self.parsePostfix(expr);
+        _ = try self.expect(.semicolon);
+        return ast.Statement{ .expr_stmt = expr };
+    }
+
     fn parsePrintStmt(self: *Parser) anyerror!ast.Statement {
         const is_newline = self.check(.keyword_println);
         _ = self.advance();
@@ -774,14 +871,52 @@ pub const Parser = struct {
         const name_tok = try self.parseName();
         _ = try self.expect(.l_brace);
 
+        var fields = std.ArrayList(ast.FieldDecl).init(self.allocator);
         var methods = std.ArrayList(ast.Method).init(self.allocator);
         while (!self.check(.r_brace) and !self.isAtEnd()) {
-            try methods.append(try self.parseMethod());
+            // Field declaration: type name; (no `(` after name)
+            // Method declaration: type name( (has `(` after name/modifiers)
+            // We need lookahead to distinguish fields from methods
+            // Save position for backtracking
+            const saved_pos = self.pos;
+            // Skip modifiers
+            while (self.check(.keyword_public) or self.check(.keyword_static)) {
+                _ = self.advance();
+            }
+            if (self.isTypeStart() or self.check(.identifier)) {
+                _ = try self.parseType(); // consume type
+                if (self.check(.identifier) or self.check(.keyword_main)) {
+                    _ = self.advance(); // consume name
+                    if (self.check(.l_paren)) {
+                        // It's a method — restore position and parse as method
+                        self.pos = saved_pos;
+                        try methods.append(try self.parseMethod());
+                    } else {
+                        // It's a field — restore position and parse field
+                        self.pos = saved_pos;
+                        // Skip modifiers again
+                        while (self.check(.keyword_public) or self.check(.keyword_static)) {
+                            _ = self.advance();
+                        }
+                        const field_type = try self.parseType();
+                        const field_name = try self.parseName();
+                        _ = try self.expect(.semicolon);
+                        try fields.append(.{ .typ = field_type, .name = field_name.value });
+                    }
+                } else {
+                    self.pos = saved_pos;
+                    try methods.append(try self.parseMethod());
+                }
+            } else {
+                self.pos = saved_pos;
+                try methods.append(try self.parseMethod());
+            }
         }
         _ = try self.expect(.r_brace);
 
         return ast.Class{
             .name = name_tok.value,
+            .fields = try fields.toOwnedSlice(),
             .methods = try methods.toOwnedSlice(),
         };
     }

@@ -1,0 +1,62 @@
+// Test multi-class collaboration: objects, constructors, method calls, this
+
+class Counter {
+    int count;
+
+    void Counter(int initial) {
+        this.count = initial;
+    }
+
+    void increment() {
+        this.count = this.count + 1;
+    }
+
+    int getCount() {
+        return this.count;
+    }
+}
+
+class Calculator {
+    int value;
+
+    void Calculator(int v) {
+        this.value = v;
+    }
+
+    int add(int x) {
+        this.value = this.value + x;
+        return this.value;
+    }
+
+    int multiply(int x) {
+        this.value = this.value * x;
+        return this.value;
+    }
+}
+
+public class Main {
+    public static void main() {
+        // Test 1: Counter class
+        Counter c = new Counter(0);
+        c.increment();
+        c.increment();
+        c.increment();
+        println(c.getCount());
+
+        // Test 2: Calculator class
+        Calculator calc = new Calculator(10);
+        println(calc.add(5));
+        println(calc.multiply(3));
+
+        // Test 3: Object field access
+        println(calc.value);
+
+        // Test 4: Object with array
+        Counter c2 = new Counter(100);
+        println(c2.getCount());
+
+        // Test 5: Method returning object field
+        Calculator calc2 = new Calculator(42);
+        println(calc2.value);
+    }
+}

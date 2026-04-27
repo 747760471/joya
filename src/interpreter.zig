@@ -9,8 +9,30 @@ pub const Value = union(enum) {
     float: f64,
     chan: *Chan,
     array: *JoyaArray,
+    object: *JoyaObject,
     null_val,
     void,
+};
+
+pub const JoyaObject = struct {
+    class_name: []const u8,
+    fields: std.StringHashMap(Value),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, class_name: []const u8) !*JoyaObject {
+        const obj = try allocator.create(JoyaObject);
+        obj.* = .{
+            .class_name = class_name,
+            .fields = std.StringHashMap(Value).init(allocator),
+            .allocator = allocator,
+        };
+        return obj;
+    }
+
+    pub fn deinit(self: *JoyaObject) void {
+        self.fields.deinit();
+        self.allocator.destroy(self);
+    }
 };
 
 pub const JoyaArray = struct {
@@ -200,6 +222,7 @@ const RuntimeCtx = struct {
     mutex: std.Thread.Mutex,
     channels: std.ArrayList(*Chan),
     arrays: std.ArrayList(*JoyaArray),
+    objects: std.ArrayList(*JoyaObject),
     heap_strings: std.ArrayList([]const u8),
     program: ?*const ast.Program,
     return_value: ?Value,
@@ -210,6 +233,7 @@ const RuntimeCtx = struct {
             .mutex = .{},
             .channels = std.ArrayList(*Chan).init(allocator),
             .arrays = std.ArrayList(*JoyaArray).init(allocator),
+            .objects = std.ArrayList(*JoyaObject).init(allocator),
             .heap_strings = std.ArrayList([]const u8).init(allocator),
             .program = null,
             .return_value = null,
@@ -221,6 +245,8 @@ const RuntimeCtx = struct {
         self.channels.deinit();
         for (self.arrays.items) |arr| arr.deinit();
         self.arrays.deinit();
+        for (self.objects.items) |obj| obj.deinit();
+        self.objects.deinit();
         for (self.heap_strings.items) |s| self.allocator.free(s);
         self.heap_strings.deinit();
     }
@@ -235,6 +261,12 @@ const RuntimeCtx = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.arrays.append(arr);
+    }
+
+    pub fn trackObject(self: *RuntimeCtx, obj: *JoyaObject) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.objects.append(obj);
     }
 
     pub fn trackString(self: *RuntimeCtx, s: []const u8) !void {
@@ -255,6 +287,7 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
         .string_literal => |v| return Value{ .string = v },
         .bool_literal => |v| return Value{ .bool = v },
         .null_literal => return Value{ .null_val = {} },
+        .this_ref => return env.get("this") orelse return error.NoThisContext,
         .identifier => |name| return env.get(name) orelse return error.UndefinedVariable,
         .binary_op => |op| {
             const left = try eval_expression(env, ctx, op.left.*);
@@ -391,6 +424,95 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
             }
             return error.NotIndexable;
         },
+        .new_object => |no| {
+            // Find the class
+            if (ctx.program) |prog| {
+                for (prog.classes) |*class| {
+                    if (std.mem.eql(u8, class.name, no.class_name)) {
+                        // Create object and initialize fields
+                        const obj = try JoyaObject.init(env.allocator, no.class_name);
+                        for (class.fields) |field| {
+                            try obj.fields.put(field.name, JoyaArray.defaultForType(field.typ));
+                        }
+                        try ctx.trackObject(obj);
+                        // Find and call constructor if exists
+                        for (class.methods) |*method| {
+                            if (std.mem.eql(u8, method.name, no.class_name)) {
+                                // Evaluate arguments
+                                var arg_vals = std.ArrayList(Value).init(env.allocator);
+                                defer arg_vals.deinit();
+                                for (no.args) |arg_expr| {
+                                    try arg_vals.append(try eval_expression(env, ctx, arg_expr));
+                                }
+                                // Create constructor environment
+                                var ctor_env = Environment.init(env.allocator);
+                                try ctor_env.set("this", Value{ .object = obj });
+                                for (method.params, 0..) |param, i| {
+                                    if (i < arg_vals.items.len) {
+                                        try ctor_env.set(param.name, arg_vals.items[i]);
+                                    }
+                                }
+                                ctx.return_value = null;
+                                var local_threads = std.ArrayList(std.Thread).init(env.allocator);
+                                const result = execute_statement(&ctor_env, ctx, method.body, &local_threads);
+                                for (local_threads.items) |t| t.join();
+                                ctor_env.deinit();
+                                _ = result catch |err| switch (err) {
+                                    error.ReturnSignal => {},
+                                    else => return err,
+                                };
+                                break;
+                            }
+                        }
+                        return Value{ .object = obj };
+                    }
+                }
+            }
+            return error.UndefinedClass;
+        },
+        .method_call => |mc| {
+            const obj_val = try eval_expression(env, ctx, mc.object.*);
+            if (obj_val != .object) return error.NotAnObject;
+            const obj = obj_val.object;
+            // Find method in the object's class
+            if (ctx.program) |prog| {
+                for (prog.classes) |*class| {
+                    if (std.mem.eql(u8, class.name, obj.class_name)) {
+                        for (class.methods) |*method| {
+                            if (std.mem.eql(u8, method.name, mc.method)) {
+                                // Evaluate arguments
+                                var arg_vals = std.ArrayList(Value).init(env.allocator);
+                                defer arg_vals.deinit();
+                                for (mc.args) |arg_expr| {
+                                    try arg_vals.append(try eval_expression(env, ctx, arg_expr));
+                                }
+                                // Create method environment with this bound
+                                var method_env = Environment.init(env.allocator);
+                                try method_env.set("this", Value{ .object = obj });
+                                for (method.params, 0..) |param, i| {
+                                    if (i < arg_vals.items.len) {
+                                        try method_env.set(param.name, arg_vals.items[i]);
+                                    }
+                                }
+                                ctx.return_value = null;
+                                var local_threads = std.ArrayList(std.Thread).init(env.allocator);
+                                const result = execute_statement(&method_env, ctx, method.body, &local_threads);
+                                for (local_threads.items) |t| t.join();
+                                method_env.deinit();
+                                _ = result catch |err| switch (err) {
+                                    error.ReturnSignal => {},
+                                    else => return err,
+                                };
+                                const return_val = ctx.return_value orelse Value.void;
+                                ctx.return_value = null;
+                                return return_val;
+                            }
+                        }
+                    }
+                }
+            }
+            return error.UndefinedMethod;
+        },
         .unary_not => |operand| {
             const val = try eval_expression(env, ctx, operand.*);
             if (val == .bool) return Value{ .bool = !val.bool };
@@ -403,7 +525,12 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
                 if (obj == .array) return Value{ .int = @intCast(obj.array.items.items.len) };
                 if (obj == .string) return Value{ .int = @intCast(obj.string.len) };
             }
-            return try eval_expression(env, ctx, fa.object.*);
+            // Object field access
+            const obj = try eval_expression(env, ctx, fa.object.*);
+            if (obj == .object) {
+                return obj.object.fields.get(fa.field) orelse Value{ .null_val = {} };
+            }
+            return obj;
         },
         .call => |c| {
             // Built-in: send
@@ -441,6 +568,7 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
             if (ctx.program) |prog| {
                 // Evaluate arguments
                 var arg_vals = std.ArrayList(Value).init(env.allocator);
+                defer arg_vals.deinit();
                 for (c.args) |arg_expr| {
                     try arg_vals.append(try eval_expression(env, ctx, arg_expr));
                 }
@@ -461,7 +589,6 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
                             const result = execute_statement(&method_env, ctx, method.body, &local_threads);
                             for (local_threads.items) |t| t.join();
                             method_env.deinit();
-                            arg_vals.deinit();
                             // Capture return value
                             _ = result catch |err| switch (err) {
                                 error.ReturnSignal => {},
@@ -473,7 +600,6 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
                         }
                     }
                 }
-                arg_vals.deinit();
             }
             return error.UndefinedFunction;
         },
@@ -495,6 +621,7 @@ fn printValue(val: Value, newline: bool) !void {
             if (newline) std.debug.print("]\n", .{}) else std.debug.print("]", .{});
         },
         .chan => if (newline) std.debug.print("<chan>\n", .{}) else std.debug.print("<chan>", .{}),
+        .object => if (newline) std.debug.print("<{s} object>\n", .{val.object.class_name}) else std.debug.print("<{s} object>", .{val.object.class_name}),
         .null_val => if (newline) std.debug.print("null\n", .{}) else std.debug.print("null", .{}),
         .void => {},
     }
@@ -509,6 +636,12 @@ fn execute_statement(env: *Environment, ctx: *RuntimeCtx, stmt: ast.Statement, t
         .assign => |a| {
             const val = try eval_expression(env, ctx, a.value);
             try env.set(a.name, val);
+        },
+        .this_assign => |ta| {
+            const this_val = env.get("this") orelse return error.NoThisContext;
+            if (this_val != .object) return error.NoThisContext;
+            const val = try eval_expression(env, ctx, ta.value);
+            try this_val.object.fields.put(ta.field, val);
         },
         .array_assign => |aa| {
             const arr_val = env.get(aa.array) orelse return error.UndefinedVariable;
@@ -550,7 +683,13 @@ fn execute_statement(env: *Environment, ctx: *RuntimeCtx, stmt: ast.Statement, t
                     cond_val = v.bool;
                 }
                 if (!cond_val) break;
-                try execute_statement(env, ctx, fl.body.*, threads);
+                const body_result = execute_statement(env, ctx, fl.body.*, threads);
+                if (body_result) |_| {} else |err| switch (err) {
+                    error.BreakSignal => break,
+                    error.ContinueSignal => {},
+                    error.ReturnSignal => return err,
+                    else => return err,
+                }
                 if (fl.inc) |inc| try execute_statement(env, ctx, inc.*, threads);
             }
         },
@@ -558,7 +697,13 @@ fn execute_statement(env: *Environment, ctx: *RuntimeCtx, stmt: ast.Statement, t
             while (true) {
                 const v = try eval_expression(env, ctx, wl.cond);
                 if (v != .bool or !v.bool) break;
-                try execute_statement(env, ctx, wl.body.*, threads);
+                const body_result = execute_statement(env, ctx, wl.body.*, threads);
+                if (body_result) |_| {} else |err| switch (err) {
+                    error.BreakSignal => break,
+                    error.ContinueSignal => {},
+                    error.ReturnSignal => return err,
+                    else => return err,
+                }
             }
         },
         .for_each => |fe| {
@@ -566,7 +711,13 @@ fn execute_statement(env: *Environment, ctx: *RuntimeCtx, stmt: ast.Statement, t
             if (iterable != .array) return error.NotAnArray;
             for (iterable.array.items.items) |item| {
                 try env.set(fe.elem_name, item);
-                try execute_statement(env, ctx, fe.body.*, threads);
+                const body_result = execute_statement(env, ctx, fe.body.*, threads);
+                if (body_result) |_| {} else |err| switch (err) {
+                    error.BreakSignal => break,
+                    error.ContinueSignal => {},
+                    error.ReturnSignal => return err,
+                    else => return err,
+                }
             }
         },
         .if_stmt => |is| {
@@ -585,6 +736,8 @@ fn execute_statement(env: *Environment, ctx: *RuntimeCtx, stmt: ast.Statement, t
             }
             return error.ReturnSignal;
         },
+        .break_stmt => return error.BreakSignal,
+        .continue_stmt => return error.ContinueSignal,
         .print_stmt => |ps| {
             const val = try eval_expression(env, ctx, ps.expr);
             try printValue(val, ps.newline);

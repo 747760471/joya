@@ -1,0 +1,32 @@
+// Test break and continue — these should FAIL to parse currently
+
+public class Main {
+    public static void main() {
+        // break in while loop
+        int i = 0;
+        while (true) {
+            if (i >= 5) {
+                break;
+            }
+            println(i);
+            i++;
+        }
+
+        // continue in for loop
+        for (int j = 0; j < 10; j++) {
+            if (j % 2 == 0) {
+                continue;
+            }
+            println(j);
+        }
+
+        // break in for-each — find first element > 50
+        int[] nums = [10, 30, 60, 80, 100];
+        for (int n : nums) {
+            if (n > 50) {
+                println("Found: " + n);
+                break;
+            }
+        }
+    }
+}

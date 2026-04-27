@@ -8,6 +8,7 @@ pub const Type = union(enum) {
     float,
     chan: *Type,
     array: *Type,
+    class_ref: []const u8,
     void,
 };
 
@@ -48,6 +49,16 @@ pub const Expression = union(enum) {
         array: *Expression,
         index: *Expression,
     },
+    new_object: struct {
+        class_name: []const u8,
+        args: []const Expression,
+    },
+    method_call: struct {
+        object: *Expression,
+        method: []const u8,
+        args: []const Expression,
+    },
+    this_ref,
 };
 
 pub const Statement = union(enum) {
@@ -58,6 +69,10 @@ pub const Statement = union(enum) {
     },
     assign: struct {
         name: []const u8,
+        value: Expression,
+    },
+    this_assign: struct {
+        field: []const u8,
         value: Expression,
     },
     array_assign: struct {
@@ -84,6 +99,8 @@ pub const Statement = union(enum) {
         iterable: Expression,
         body: *Statement,
     },
+    break_stmt,
+    continue_stmt,
     if_stmt: struct {
         cond: Expression,
         then_branch: *Statement,
@@ -101,6 +118,11 @@ pub const Param = struct {
     name: []const u8,
 };
 
+pub const FieldDecl = struct {
+    typ: Type,
+    name: []const u8,
+};
+
 pub const Method = struct {
     name: []const u8,
     return_type: Type,
@@ -110,6 +132,7 @@ pub const Method = struct {
 
 pub const Class = struct {
     name: []const u8,
+    fields: []const FieldDecl,
     methods: []const Method,
 };
 
