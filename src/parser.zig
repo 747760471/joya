@@ -69,7 +69,8 @@ pub const Parser = struct {
             self.check(.keyword_chan);
     }
 
-    fn parseType(self: *Parser) !ast.Type {
+    /// Parse a base type without [] suffix (used by new T[size])
+    fn parseBaseType(self: *Parser) anyerror!ast.Type {
         if (self.check(.keyword_int)) { _ = self.advance(); return .int; }
         if (self.check(.keyword_string)) { _ = self.advance(); return .string; }
         if (self.check(.keyword_bool)) { _ = self.advance(); return .bool; }
@@ -87,6 +88,19 @@ pub const Parser = struct {
         const tok = self.peek();
         std.debug.print("Parse error: expected type, got {} ('{s}') at line {}\n", .{ tok.typ, tok.value, tok.line });
         return error.ExpectedType;
+    }
+
+    fn parseType(self: *Parser) anyerror!ast.Type {
+        var result = try self.parseBaseType();
+        // Array type: T[] (zero or more [] suffixes)
+        while (self.check(.l_bracket) and self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].typ == .r_bracket) {
+            _ = self.advance(); // [
+            _ = self.advance(); // ]
+            const inner = try self.allocator.create(ast.Type);
+            inner.* = result;
+            result = ast.Type{ .array = inner };
+        }
+        return result;
     }
 
     // ---- Expression parsing (precedence climbing) ----
@@ -223,19 +237,63 @@ pub const Parser = struct {
         if (self.check(.keyword_true)) { _ = self.advance(); return ast.Expression{ .bool_literal = true }; }
         if (self.check(.keyword_false)) { _ = self.advance(); return ast.Expression{ .bool_literal = false }; }
 
+        // Null literal
+        if (self.check(.keyword_null)) { _ = self.advance(); return ast.Expression{ .null_literal = {} }; }
+
         // new chan<T>(capacity)
         if (self.check(.keyword_new)) {
             _ = self.advance();
-            _ = try self.expect(.keyword_chan);
-            _ = try self.expect(.lt);
-            const elem_type = try self.parseType();
-            _ = try self.expect(.gt);
-            _ = try self.expect(.l_paren);
-            const cap_tok = try self.expect(.int_literal);
-            const capacity = std.fmt.parseInt(i64, cap_tok.value, 10) catch return error.InvalidIntLiteral;
-            _ = try self.expect(.r_paren);
+            // new chan<T>(capacity)
+            if (self.check(.keyword_chan)) {
+                _ = self.advance();
+                _ = try self.expect(.lt);
+                const elem_type = try self.parseType();
+                _ = try self.expect(.gt);
+                _ = try self.expect(.l_paren);
+                const cap_tok = try self.expect(.int_literal);
+                const capacity = std.fmt.parseInt(i64, cap_tok.value, 10) catch return error.InvalidIntLiteral;
+                _ = try self.expect(.r_paren);
+                return ast.Expression{
+                    .new_chan = .{ .elem_type = elem_type, .capacity = capacity },
+                };
+            }
+            // new T[size] — array creation
+            const elem_type = try self.parseBaseType();
+            _ = try self.expect(.l_bracket);
+            const size_expr = try self.parseExpression();
+            _ = try self.expect(.r_bracket);
+            const size_ptr = try self.allocator.create(ast.Expression);
+            size_ptr.* = size_expr;
             return ast.Expression{
-                .new_chan = .{ .elem_type = elem_type, .capacity = capacity },
+                .new_array = .{ .elem_type = elem_type, .size = size_ptr },
+            };
+        }
+
+        // Array literal: [expr, expr, ...]
+        if (self.check(.l_bracket)) {
+            _ = self.advance();
+            var elements = std.ArrayList(ast.Expression).init(self.allocator);
+            if (!self.check(.r_bracket)) {
+                const first = try self.parseExpression();
+                try elements.append(first);
+                while (self.check(.comma)) {
+                    _ = self.advance();
+                    try elements.append(try self.parseExpression());
+                }
+            }
+            _ = try self.expect(.r_bracket);
+            // Infer element type from first element
+            const inferred_type: ast.Type = if (elements.items.len > 0) blk: {
+                break :blk switch (elements.items[0]) {
+                    .int_literal => ast.Type.int,
+                    .float_literal => ast.Type.float,
+                    .string_literal => ast.Type.string,
+                    .bool_literal => ast.Type.bool,
+                    else => ast.Type.void,
+                };
+            } else ast.Type.void;
+            return ast.Expression{
+                .array_literal = .{ .elem_type = inferred_type, .elements = try elements.toOwnedSlice() },
             };
         }
 
@@ -260,7 +318,7 @@ pub const Parser = struct {
             };
         }
 
-        // Identifier (possibly function call or field access)
+        // Identifier (possibly function call, array index, or field access)
         if (self.check(.identifier) or self.check(.keyword_main)) {
             const name_tok = self.advance();
             // Function call: name(args)
@@ -275,21 +333,15 @@ pub const Parser = struct {
                     }
                 }
                 _ = try self.expect(.r_paren);
-                return ast.Expression{
+                var expr = ast.Expression{
                     .call = .{ .name = name_tok.value, .args = try args.toOwnedSlice() },
                 };
+                expr = try self.parsePostfix(expr);
+                return expr;
             }
-            // Field access: name.field
-            if (self.check(.dot)) {
-                _ = self.advance();
-                const field = try self.parseName();
-                const obj = try self.allocator.create(ast.Expression);
-                obj.* = .{ .identifier = name_tok.value };
-                return ast.Expression{
-                    .field_access = .{ .object = obj, .field = field.value },
-                };
-            }
-            return ast.Expression{ .identifier = name_tok.value };
+            var expr = ast.Expression{ .identifier = name_tok.value };
+            expr = try self.parsePostfix(expr);
+            return expr;
         }
 
         // Parenthesized expression
@@ -303,6 +355,37 @@ pub const Parser = struct {
         const tok = self.peek();
         std.debug.print("Parse error: unexpected token in expression {} ('{s}') at line {}\n", .{ tok.typ, tok.value, tok.line });
         return error.UnexpectedToken;
+    }
+
+    // ---- Postfix operators: array index, field access ----
+
+    fn parsePostfix(self: *Parser, expr: ast.Expression) anyerror!ast.Expression {
+        var result = expr;
+        while (true) {
+            // Array index: expr[index]
+            if (self.check(.l_bracket)) {
+                _ = self.advance();
+                const index = try self.parseExpression();
+                _ = try self.expect(.r_bracket);
+                const arr_ptr = try self.allocator.create(ast.Expression);
+                arr_ptr.* = result;
+                const idx_ptr = try self.allocator.create(ast.Expression);
+                idx_ptr.* = index;
+                result = ast.Expression{ .array_index = .{ .array = arr_ptr, .index = idx_ptr } };
+            }
+            // Field access: expr.field
+            else if (self.check(.dot)) {
+                _ = self.advance();
+                const field = try self.parseName();
+                const obj = try self.allocator.create(ast.Expression);
+                obj.* = result;
+                result = ast.Expression{ .field_access = .{ .object = obj, .field = field.value } };
+            }
+            else {
+                break;
+            }
+        }
+        return result;
     }
 
     // ---- Statement parsing ----
@@ -354,6 +437,30 @@ pub const Parser = struct {
 
     fn parseAssignOrExprStmt(self: *Parser) anyerror!ast.Statement {
         const name_tok = self.advance();
+
+        // Array index assignment: name[index] = expr;
+        if (self.check(.l_bracket)) {
+            _ = self.advance();
+            const index = try self.parseExpression();
+            _ = try self.expect(.r_bracket);
+            if (self.check(.eq)) {
+                _ = self.advance();
+                const value = try self.parseExpression();
+                _ = try self.expect(.semicolon);
+                return ast.Statement{
+                    .array_assign = .{ .array = name_tok.value, .index = index, .value = value },
+                };
+            }
+            // arr[i] as expression statement (e.g. side-effect via function result)
+            const arr_ptr = try self.allocator.create(ast.Expression);
+            arr_ptr.* = .{ .identifier = name_tok.value };
+            const idx_ptr = try self.allocator.create(ast.Expression);
+            idx_ptr.* = index;
+            var expr = ast.Expression{ .array_index = .{ .array = arr_ptr, .index = idx_ptr } };
+            expr = try self.parsePostfix(expr);
+            _ = try self.expect(.semicolon);
+            return ast.Statement{ .expr_stmt = expr };
+        }
 
         // Assignment: name = expr;
         if (self.check(.eq)) {
@@ -411,23 +518,17 @@ pub const Parser = struct {
                 }
             }
             _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return ast.Statement{
-                .expr_stmt = ast.Expression{
-                    .call = .{ .name = name_tok.value, .args = try args.toOwnedSlice() },
-                },
+            var expr = ast.Expression{
+                .call = .{ .name = name_tok.value, .args = try args.toOwnedSlice() },
             };
+            expr = try self.parsePostfix(expr);
+            _ = try self.expect(.semicolon);
+            return ast.Statement{ .expr_stmt = expr };
         }
 
-        // Field access or plain identifier expression statement
+        // Field access, array index, or plain identifier expression statement
         var expr = ast.Expression{ .identifier = name_tok.value };
-        if (self.check(.dot)) {
-            _ = self.advance();
-            const field = try self.parseName();
-            const obj = try self.allocator.create(ast.Expression);
-            obj.* = expr;
-            expr = ast.Expression{ .field_access = .{ .object = obj, .field = field.value } };
-        }
+        expr = try self.parsePostfix(expr);
         _ = try self.expect(.semicolon);
         return ast.Statement{ .expr_stmt = expr };
     }
@@ -445,6 +546,26 @@ pub const Parser = struct {
         _ = try self.expect(.keyword_for);
         _ = try self.expect(.l_paren);
 
+        // Detect for-each: for (Type name : iterable) { ... }
+        // Lookahead: type keyword, then identifier, then colon
+        if (self.isTypeStart() and self.pos + 2 < self.tokens.len and
+            (self.tokens[self.pos + 1].typ == .identifier or self.tokens[self.pos + 1].typ == .keyword_main) and
+            self.tokens[self.pos + 2].typ == .colon)
+        {
+            const elem_type = try self.parseType();
+            const name_tok = try self.parseName();
+            _ = try self.expect(.colon);
+            const iterable = try self.parseExpression();
+            _ = try self.expect(.r_paren);
+            const body = try self.parseBlock();
+            const body_ptr = try self.allocator.create(ast.Statement);
+            body_ptr.* = body;
+            return ast.Statement{
+                .for_each = .{ .elem_type = elem_type, .elem_name = name_tok.value, .iterable = iterable, .body = body_ptr },
+            };
+        }
+
+        // Traditional for loop: for (init; cond; inc) { ... }
         // Parse init
         var loop_init: ?*ast.Statement = null;
         if (!self.check(.semicolon)) {

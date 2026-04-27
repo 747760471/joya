@@ -1,0 +1,52 @@
+// Test method calls, parameters, and return values
+
+public class Main {
+    public static void main() {
+        // Test 1: Simple method call with no params
+        greet();
+
+        // Test 2: Method with parameters
+        printSum(3, 7);
+
+        // Test 3: Method with return value
+        int result = add(10, 20);
+        println(result);
+
+        // Test 4: Chained operations with return value
+        int val = add(add(1, 2), add(3, 4));
+        println(val);
+
+        // Test 5: Method using array parameter
+        int[] data = [5, 10, 15, 20];
+        int total = sumArray(data);
+        println(total);
+
+        // Test 6: String return
+        string msg = makeGreeting("World");
+        println(msg);
+    }
+
+    static void greet() {
+        println("Hello from greet!");
+    }
+
+    static void printSum(int a, int b) {
+        println("Sum: " + (a + b));
+    }
+
+    static int add(int a, int b) {
+        return a + b;
+    }
+
+    static int sumArray(int[] arr) {
+        int total = 0;
+        for (int x : arr) {
+            total = total + x;
+        }
+        return total;
+    }
+
+    static string makeGreeting(string name) {
+        return "Hello, " + name + "!";
+    }
+}

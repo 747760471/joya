@@ -1,0 +1,37 @@
+// Test null value support
+
+public class Main {
+    public static void main() {
+        // Test 1: null literal
+        int x = 42;
+        x = null;
+        println(x);
+
+        // Test 2: null comparison
+        println(x == null);
+        println(x != null);
+
+        // Test 3: channel receive returns null when closed
+        chan<int> ch = new chan<int>(1);
+        send(ch, 100);
+        close(ch);
+        int val = receive(ch);
+        println(val);
+        int val2 = receive(ch);
+        println(val2);
+        println(val2 == null);
+
+        // Test 4: null in string concatenation
+        string msg = "value: " + null;
+        println(msg);
+
+        // Test 5: method returning null
+        string result = getNull();
+        println(result);
+        println(result == null);
+    }
+
+    static string getNull() {
+        return null;
+    }
+}

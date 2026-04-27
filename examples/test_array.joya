@@ -1,0 +1,47 @@
+// Test array features: creation, literal, index, assign, length, for-each
+
+public class Main {
+    public static void main() {
+        // Test 1: new array with default values
+        int[] arr = new int[5];
+        println(arr.length);
+
+        // Test 2: array index assignment
+        arr[0] = 10;
+        arr[1] = 20;
+        arr[2] = 30;
+        println(arr[0]);
+        println(arr[1]);
+        println(arr[2]);
+
+        // Test 3: array literal
+        int[] nums = [100, 200, 300];
+        println(nums.length);
+        println(nums[0]);
+        println(nums[1]);
+        println(nums[2]);
+
+        // Test 4: for-each loop
+        for (int n : nums) {
+            println(n);
+        }
+
+        // Test 5: traditional for loop with array
+        for (int i = 0; i < arr.length; i++) {
+            println(arr[i]);
+        }
+
+        // Test 6: string length
+        string s = "hello";
+        println(s.length);
+
+        // Test 7: string array
+        string[] names = new string[3];
+        names[0] = "Alice";
+        names[1] = "Bob";
+        names[2] = "Charlie";
+        for (string name : names) {
+            println(name);
+        }
+    }
+}

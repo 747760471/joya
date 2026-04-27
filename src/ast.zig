@@ -7,6 +7,7 @@ pub const Type = union(enum) {
     bool,
     float,
     chan: *Type,
+    array: *Type,
     void,
 };
 
@@ -15,6 +16,7 @@ pub const Expression = union(enum) {
     float_literal: f64,
     string_literal: []const u8,
     bool_literal: bool,
+    null_literal,
     identifier: []const u8,
     binary_op: struct {
         op: lexer.TokenType,
@@ -34,6 +36,18 @@ pub const Expression = union(enum) {
         object: *Expression,
         field: []const u8,
     },
+    new_array: struct {
+        elem_type: Type,
+        size: *Expression,
+    },
+    array_literal: struct {
+        elem_type: Type,
+        elements: []const Expression,
+    },
+    array_index: struct {
+        array: *Expression,
+        index: *Expression,
+    },
 };
 
 pub const Statement = union(enum) {
@@ -44,6 +58,11 @@ pub const Statement = union(enum) {
     },
     assign: struct {
         name: []const u8,
+        value: Expression,
+    },
+    array_assign: struct {
+        array: []const u8,
+        index: Expression,
         value: Expression,
     },
     expr_stmt: Expression,
@@ -57,6 +76,12 @@ pub const Statement = union(enum) {
     },
     while_loop: struct {
         cond: Expression,
+        body: *Statement,
+    },
+    for_each: struct {
+        elem_type: Type,
+        elem_name: []const u8,
+        iterable: Expression,
         body: *Statement,
     },
     if_stmt: struct {

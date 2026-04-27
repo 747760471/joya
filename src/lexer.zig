@@ -25,6 +25,7 @@ pub const TokenType = enum {
     keyword_true,
     keyword_false,
     keyword_while,
+    keyword_null,
 
     plus,
     minus,
@@ -50,6 +51,7 @@ pub const TokenType = enum {
     r_bracket,
     comma,
     dot,
+    colon,
 
     identifier,
     int_literal,
@@ -97,6 +99,7 @@ pub const Lexer = struct {
         .{ "true", .keyword_true },
         .{ "false", .keyword_false },
         .{ "while", .keyword_while },
+        .{ "null", .keyword_null },
     });
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Lexer {
@@ -342,6 +345,10 @@ pub const Lexer = struct {
                 '.' => {
                     _ = self.next();
                     try self.tokens.append(.{ .typ = .dot, .value = ".", .line = self.line });
+                },
+                ':' => {
+                    _ = self.next();
+                    try self.tokens.append(.{ .typ = .colon, .value = ":", .line = self.line });
                 },
                 '%' => {
                     _ = self.next();

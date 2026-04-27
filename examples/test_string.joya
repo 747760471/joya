@@ -1,0 +1,34 @@
+// Test string features: length, index, comparison, concatenation
+
+public class Main {
+    public static void main() {
+        // Test 1: string length
+        string s = "hello";
+        println(s.length);
+
+        // Test 2: string index access
+        println(s[0]);
+        println(s[4]);
+
+        // Test 3: string comparison
+        string a = "abc";
+        string b = "abc";
+        string c = "xyz";
+        println(a == b);
+        println(a == c);
+        println(a != c);
+
+        // Test 4: string concatenation
+        string greeting = "Hello" + " " + "World";
+        println(greeting);
+
+        // Test 5: int to string concatenation
+        string msg = "Value: " + 42;
+        println(msg);
+
+        // Test 6: bool comparison
+        println(true == true);
+        println(true == false);
+        println(true != false);
+    }
+}
