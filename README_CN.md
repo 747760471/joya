@@ -172,6 +172,7 @@ joya/
 
 - 邮箱：747760471@qq.com
 - GitHub：https://github.com/747760471/joya
+- Gitee：https://gitee.com/txd747760471/joya
 
 ---
 
