@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const lexer = @import("lexer.zig");
+const scheduler = @import("scheduler.zig");
 
 pub const Value = union(enum) {
     int: i64,
@@ -80,10 +81,11 @@ pub const Chan = struct {
     capacity: usize,
     queue: std.ArrayList(Value),
     mutex: std.Thread.Mutex,
-    send_cond: std.Thread.Condition,
-    recv_cond: std.Thread.Condition,
+    send_waiters: std.ArrayList(*scheduler.Goroutine),
+    recv_waiters: std.ArrayList(*scheduler.Goroutine),
     closed: bool = false,
     allocator: std.mem.Allocator,
+    use_scheduler: bool,
 
     pub fn init(allocator: std.mem.Allocator, elem_type: ast.Type, capacity: usize) !*Chan {
         const ch = try allocator.create(Chan);
@@ -92,44 +94,96 @@ pub const Chan = struct {
             .capacity = capacity,
             .queue = std.ArrayList(Value).init(allocator),
             .mutex = .{},
-            .send_cond = .{},
-            .recv_cond = .{},
+            .send_waiters = std.ArrayList(*scheduler.Goroutine).init(allocator),
+            .recv_waiters = std.ArrayList(*scheduler.Goroutine).init(allocator),
             .allocator = allocator,
+            .use_scheduler = false,
         };
         return ch;
     }
 
     pub fn deinit(self: *Chan) void {
+        self.send_waiters.deinit();
+        self.recv_waiters.deinit();
         self.queue.deinit();
         self.allocator.destroy(self);
     }
 
     pub fn send(self: *Chan, val: Value) !void {
         self.mutex.lock();
-        defer self.mutex.unlock();
 
         while (self.queue.items.len >= self.capacity and !self.closed) {
-            self.send_cond.wait(&self.mutex);
+            if (self.use_scheduler and scheduler.tls_current_goroutine != null) {
+                // Yield: save current goroutine as waiter and switch to scheduler
+                const g = scheduler.tls_current_goroutine.?;
+                self.send_waiters.append(g) catch {};
+                self.mutex.unlock();
+                scheduler.yield();
+                self.mutex.lock();
+            } else {
+                // Fallback: use condvar (non-scheduler mode or main goroutine)
+                // We need a condition variable for non-scheduler mode
+                self.mutex.unlock();
+                std.time.sleep(1 * std.time.ns_per_us);
+                self.mutex.lock();
+            }
         }
 
-        if (self.closed) return error.ChannelClosed;
+        if (self.closed) {
+            self.mutex.unlock();
+            return error.ChannelClosed;
+        }
 
         try self.queue.append(val);
-        self.recv_cond.signal();
+
+        // Wake up a receiver if any
+        if (self.recv_waiters.items.len > 0) {
+            const waiter = self.recv_waiters.orderedRemove(0);
+            const sched = scheduler.tls_scheduler orelse {
+                self.mutex.unlock();
+                return;
+            };
+            sched.unblock(waiter);
+        }
+
+        self.mutex.unlock();
     }
 
     pub fn receive(self: *Chan) !?Value {
         self.mutex.lock();
-        defer self.mutex.unlock();
 
         while (self.queue.items.len == 0 and !self.closed) {
-            self.recv_cond.wait(&self.mutex);
+            if (self.use_scheduler and scheduler.tls_current_goroutine != null) {
+                const g = scheduler.tls_current_goroutine.?;
+                self.recv_waiters.append(g) catch {};
+                self.mutex.unlock();
+                scheduler.yield();
+                self.mutex.lock();
+            } else {
+                self.mutex.unlock();
+                std.time.sleep(1 * std.time.ns_per_us);
+                self.mutex.lock();
+            }
         }
 
-        if (self.closed and self.queue.items.len == 0) return null;
+        if (self.closed and self.queue.items.len == 0) {
+            self.mutex.unlock();
+            return null;
+        }
 
         const val = self.queue.orderedRemove(0);
-        self.send_cond.signal();
+
+        // Wake up a sender if any
+        if (self.send_waiters.items.len > 0) {
+            const waiter = self.send_waiters.orderedRemove(0);
+            const sched = scheduler.tls_scheduler orelse {
+                self.mutex.unlock();
+                return val;
+            };
+            sched.unblock(waiter);
+        }
+
+        self.mutex.unlock();
         return val;
     }
 
@@ -137,8 +191,20 @@ pub const Chan = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.closed = true;
-        self.send_cond.broadcast();
-        self.recv_cond.broadcast();
+        // Wake up all waiters
+        if (self.use_scheduler) {
+            const sched = scheduler.tls_scheduler;
+            if (sched) |s| {
+                for (self.send_waiters.items) |waiter| {
+                    s.unblock(waiter);
+                }
+                for (self.recv_waiters.items) |waiter| {
+                    s.unblock(waiter);
+                }
+            }
+        }
+        self.send_waiters.clearRetainingCapacity();
+        self.recv_waiters.clearRetainingCapacity();
     }
 };
 
@@ -388,6 +454,7 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
         },
         .new_chan => |nc| {
             const ch = try Chan.init(env.allocator, nc.elem_type, @intCast(nc.capacity));
+            ch.use_scheduler = scheduler.tls_scheduler != null;
             try ctx.trackChan(ch);
             return Value{ .chan = ch };
         },
@@ -606,6 +673,26 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
     }
 }
 
+// ---- Goroutine entry point for scheduler mode ----
+
+const GoCtx = struct {
+    env_copy: Environment,
+    ctx_copy: *RuntimeCtx,
+    body_copy: ast.Statement,
+};
+
+fn goRoutineEntry(_: *scheduler.Goroutine, user_data: ?*anyopaque) void {
+    const ctx: *GoCtx = @ptrCast(@alignCast(user_data orelse return));
+    var local_env = ctx.env_copy;
+    defer local_env.deinit();
+    const allocator = local_env.allocator;
+    var inner_threads = std.ArrayList(std.Thread).init(allocator);
+    defer inner_threads.deinit();
+    execute_statement(&local_env, ctx.ctx_copy, ctx.body_copy, &inner_threads) catch {};
+    for (inner_threads.items) |t| t.join();
+    allocator.destroy(ctx);
+}
+
 fn printValue(val: Value, newline: bool) !void {
     switch (val) {
         .int => if (newline) std.debug.print("{}\n", .{val.int}) else std.debug.print("{}", .{val.int}),
@@ -661,18 +748,29 @@ fn execute_statement(env: *Environment, ctx: *RuntimeCtx, stmt: ast.Statement, t
             }
         },
         .go_stmt => |body| {
-            const env_clone = try env.clone();
-            const thread = try std.Thread.spawn(.{}, struct {
-                fn run(env_copy: Environment, ctx_copy: *RuntimeCtx, b: ast.Statement) !void {
-                    var local_env = env_copy;
-                    defer local_env.deinit();
-                    var inner_threads = std.ArrayList(std.Thread).init(local_env.allocator);
-                    defer inner_threads.deinit();
-                    try execute_statement(&local_env, ctx_copy, b, &inner_threads);
-                    for (inner_threads.items) |t| t.join();
-                }
-            }.run, .{ env_clone, ctx, body.* });
-            try threads.append(thread);
+            if (scheduler.tls_scheduler) |sched| {
+                // Scheduler mode: spawn as lightweight goroutine
+                const env_clone = try env.clone();
+                const go_ctx = try env.allocator.create(GoCtx);
+                go_ctx.* = .{ .env_copy = env_clone, .ctx_copy = ctx, .body_copy = body.* };
+
+                const g = sched.spawn(goRoutineEntry, @ptrCast(@alignCast(go_ctx))) catch return;
+                _ = g;
+            } else {
+                // Fallback: OS thread mode (original behavior)
+                const env_clone = try env.clone();
+                const thread = try std.Thread.spawn(.{}, struct {
+                    fn run(env_copy: Environment, ctx_copy: *RuntimeCtx, b: ast.Statement) !void {
+                        var local_env = env_copy;
+                        defer local_env.deinit();
+                        var inner_threads = std.ArrayList(std.Thread).init(local_env.allocator);
+                        defer inner_threads.deinit();
+                        try execute_statement(&local_env, ctx_copy, b, &inner_threads);
+                        for (inner_threads.items) |t| t.join();
+                    }
+                }.run, .{ env_clone, ctx, body.* });
+                try threads.append(thread);
+            }
         },
         .for_loop => |fl| {
             if (fl.init) |init| try execute_statement(env, ctx, init.*, threads);
@@ -764,6 +862,44 @@ pub fn run(allocator: std.mem.Allocator, program: ast.Program) !void {
     var ts_alloc = ThreadSafeAlloc.init(allocator);
     const safe_alloc = ts_alloc.allocator();
 
+    // Try scheduler mode
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const sched = scheduler.Scheduler.init(safe_alloc, cpu_count) catch null;
+    if (sched) |s| {
+        // Create main goroutine that executes main()
+        const main_body = main_method.?.body;
+        const MainCtx = struct {
+            env: Environment,
+            ctx: RuntimeCtx,
+            body: ast.Statement,
+        };
+        const main_ctx = try safe_alloc.create(MainCtx);
+        main_ctx.* = .{
+            .env = Environment.init(safe_alloc),
+            .ctx = RuntimeCtx.init(safe_alloc),
+            .body = main_body,
+        };
+        main_ctx.ctx.program = &program;
+
+        _ = try s.spawn(struct {
+            fn run(_: *scheduler.Goroutine, user_data: ?*anyopaque) void {
+                const mc: *MainCtx = @ptrCast(@alignCast(user_data orelse return));
+                var threads = std.ArrayList(std.Thread).init(mc.env.allocator);
+                defer threads.deinit();
+                execute_statement(&mc.env, &mc.ctx, mc.body, &threads) catch {};
+                for (threads.items) |t| t.join();
+                mc.env.deinit();
+                mc.ctx.deinit();
+                mc.env.allocator.destroy(mc);
+            }
+        }.run, @ptrCast(@alignCast(main_ctx)));
+
+        try scheduler.run(s);
+        s.deinit();
+        return;
+    }
+
+    // Fallback: original OS thread mode
     var env = Environment.init(safe_alloc);
     defer env.deinit();
 

@@ -1,0 +1,30 @@
+// Joya Scheduler Stress Test: 1000 concurrent goroutines via channels
+// This would be impossible with OS threads (each uses 1MB+ stack)
+
+public class Main {
+    public static void main() {
+        chan<int> ch = new chan<int>(1000);
+
+        // Launch 1000 goroutines, each sends its ID
+        for (int i = 0; i < 1000; i++) {
+            go {
+                send(ch, i);
+            };
+        }
+
+        // Receive all 1000 values and sum them
+        int total = 0;
+        for (int i = 0; i < 1000; i++) {
+            int val = receive(ch);
+            total = total + val;
+        }
+
+        // Expected: 0+1+2+...+999 = 999*1000/2 = 499500
+        println("Total from 1000 goroutines: " + total);
+        if (total == 499500) {
+            println("PASSED!");
+        } else {
+            println("FAILED: expected 499500");
+        }
+    }
+}

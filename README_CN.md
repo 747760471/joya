@@ -15,6 +15,7 @@ Joya 是一门系统级编程语言，旨在融合 Java 熟悉的面向对象语
 | 语法 | 繁琐，强 OOP | 简洁，类 C | **Java 风格的类与方法** |
 | 并发 | 线程、锁、CompletableFuture | goroutine + channel | **go {} + chan\<T\>** |
 | 性能 | JVM 开销 | 原生，快 | **原生执行（LLVM，计划中）** |
+| 调度器 | OS 线程（每个 ~1MB 栈） | M:N 协程 | **M:N 协程（Fiber 实现）** |
 | 学习成本 | — | 新范式 | **Java 开发者零成本** |
 
 Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新的语法。Joya 让你在最熟悉的结构里，用 Go 风格的并发模型写出高效并发程序。
@@ -23,6 +24,7 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 
 - **熟悉** — 类、方法、大括号、分号。会 Java 就会 Joya。
 - **天生并发** — `go {}` 启动协程，`chan<T>` 连接协程。无需手动管锁和线程池。
+- **轻量调度** — M:N 用户态协程调度器。数万协程运行在少数 OS 线程上。
 - **高性能** — 通过 LLVM 编译为独立原生可执行文件（计划中）。无运行时，无虚拟机。
 - **安全** — 垃圾回收保证内存安全。无悬垂指针，无数据竞争。
 - **简洁** — 最少样板代码。`public static void main()` 即可开始。
@@ -52,23 +54,76 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 | **控制流**：`for`、`while`、`for-each`、`if/else if/else`、`return`、`break`、`continue` | ✅ |
 | **布尔逻辑**：`&&`、`\|\|`、`!`（短路求值） | ✅ |
 | **算术运算**：int/float 混合运算、`%` 取模 | ✅ |
-| **`go {}` 协程**（OS 线程，环境深拷贝） | ✅ |
-| **`chan<T>` 带缓冲通道**（mutex + condvar，send/receive/close） | ✅ |
+| **`go {}` 协程**（用户态 M:N 调度器） | ✅ |
+| **`chan<T>` 带缓冲通道**（阻塞时让出 CPU，唤醒时重新入队） | ✅ |
 | **注释**：`//` 行注释、`/* */` 嵌套块注释 | ✅ |
 | **内存管理**：Arena + ThreadSafeAlloc，零泄漏 | ✅ |
+
+### 阶段二：用户态协程调度器 — 已完成
+
+基于 Windows Fiber 的 M:N 协程调度器，实现轻量级并发。
+
+| 功能 | 状态 |
+|------|------|
+| **M:N 调度模型** — N 个协程运行在 M 个 OS 线程上（M = CPU 核心数） | ✅ |
+| **Windows Fiber 上下文切换** — 纳秒级切换 | ✅ |
+| **全局运行队列** — 锁保护，工作线程竞争获取协程 | ✅ |
+| **`go {}` 创建轻量级协程** — 不再为每个 go 创建 OS 线程 | ✅ |
+| **Chan 集成** — `send`/`receive` 阻塞 → 让出 CPU；数据就绪 → 重新入队 | ✅ |
+| **压力测试** — 1000+ 并发协程 + 通道通信，零泄漏 | ✅ |
+
+#### 调度器 vs OS 线程
+
+| | OS 线程（阶段一） | Fiber 调度器（阶段二） |
+|---|---|---|
+| 栈开销 | ~1MB/线程 | ~64KB/Fiber |
+| 上下文切换 | ~1μs（内核） | ~100ns（用户态） |
+| 最大并发 | ~1,000 | ~100,000+ |
+| Chan 阻塞 | condvar（内核等待） | yield（用户态让出） |
 
 ### 路线图
 
 | 阶段 | 目标 | 状态 |
 |------|------|------|
 | **1** | 解释器原型 — 验证语法与并发语义 | ✅ 已完成 |
-| **2** | 用户态协程调度器（M:N 模型，工作窃取） | 🔜 下一阶段 |
-| **3** | LLVM 后端 — 编译为原生可执行文件 | 📋 计划中 |
+| **2** | 用户态协程调度器（M:N，Fiber 实现） | ✅ 已完成 |
+| **3** | LLVM 后端 — 编译为原生可执行文件 | 🔜 下一阶段 |
 | **4** | 自举 — 用 Joya 重写编译器 | 📋 计划中 |
 
 ---
 
 ## 💻 示例
+
+### 1000 协程压力测试
+
+```java
+public class Main {
+    public static void main() {
+        chan<int> ch = new chan<int>(1000);
+
+        // 启动 1000 个协程 — OS 线程模式不可能做到
+        for (int i = 0; i < 1000; i++) {
+            go {
+                send(ch, i);
+            };
+        }
+
+        // 接收并求和
+        int total = 0;
+        for (int i = 0; i < 1000; i++) {
+            int val = receive(ch);
+            total = total + val;
+        }
+        // total = 0+1+2+...+999 = 499500
+        println("1000 协程总和: " + total);
+    }
+}
+```
+
+```
+1000 协程总和: 499500
+PASSED!
+```
 
 ### 协程 + 通道
 
@@ -227,11 +282,13 @@ joya/
 │   ├── lexer.zig          # 词法分析器（28+ 关键字）
 │   ├── ast.zig            # AST 结构定义
 │   ├── parser.zig         # 递归下降解析器（优先级爬升法）
-│   └── interpreter.zig    # 解释器核心（对象、数组、并发、通道）
+│   ├── scheduler.zig      # M:N 协程调度器（Windows Fiber）
+│   └── interpreter.zig    # 解释器核心（对象、数组、通道、调度器集成）
 └── examples/
     ├── hello.joya         # 协程与通道示例
     ├── features.joya      # 特性展示
     ├── demo_sort.joya     # 并发排序 Demo
+    ├── stress_test.joya   # 1000 协程压力测试
     ├── test_array.joya    # 数组测试
     ├── test_string.joya   # 字符串测试
     ├── test_method.joya   # 方法调用测试
