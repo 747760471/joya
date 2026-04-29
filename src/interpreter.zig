@@ -10,6 +10,7 @@ pub const Value = union(enum) {
     float: f64,
     chan: *Chan,
     array: *JoyaArray,
+    map: *JoyaMap,
     object: *JoyaObject,
     null_val,
     void,
@@ -73,6 +74,29 @@ pub const JoyaArray = struct {
             .bool => Value{ .bool = false },
             else => Value.void,
         };
+    }
+};
+
+pub const JoyaMap = struct {
+    key_type: ast.Type,
+    value_type: ast.Type,
+    entries: std.StringHashMap(Value),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, key_type: ast.Type, value_type: ast.Type) !*JoyaMap {
+        const m = try allocator.create(JoyaMap);
+        m.* = .{
+            .key_type = key_type,
+            .value_type = value_type,
+            .entries = std.StringHashMap(Value).init(allocator),
+            .allocator = allocator,
+        };
+        return m;
+    }
+
+    pub fn deinit(self: *JoyaMap) void {
+        self.entries.deinit();
+        self.allocator.destroy(self);
     }
 };
 
@@ -288,10 +312,12 @@ const RuntimeCtx = struct {
     mutex: std.Thread.Mutex,
     channels: std.ArrayList(*Chan),
     arrays: std.ArrayList(*JoyaArray),
+    maps: std.ArrayList(*JoyaMap),
     objects: std.ArrayList(*JoyaObject),
     heap_strings: std.ArrayList([]const u8),
     program: ?*const ast.Program,
     return_value: ?Value,
+    thrown_value: ?Value,
 
     pub fn init(allocator: std.mem.Allocator) RuntimeCtx {
         return .{
@@ -299,10 +325,12 @@ const RuntimeCtx = struct {
             .mutex = .{},
             .channels = std.ArrayList(*Chan).init(allocator),
             .arrays = std.ArrayList(*JoyaArray).init(allocator),
+            .maps = std.ArrayList(*JoyaMap).init(allocator),
             .objects = std.ArrayList(*JoyaObject).init(allocator),
             .heap_strings = std.ArrayList([]const u8).init(allocator),
             .program = null,
             .return_value = null,
+            .thrown_value = null,
         };
     }
 
@@ -311,6 +339,8 @@ const RuntimeCtx = struct {
         self.channels.deinit();
         for (self.arrays.items) |arr| arr.deinit();
         self.arrays.deinit();
+        for (self.maps.items) |m| m.deinit();
+        self.maps.deinit();
         for (self.objects.items) |obj| obj.deinit();
         self.objects.deinit();
         for (self.heap_strings.items) |s| self.allocator.free(s);
@@ -327,6 +357,12 @@ const RuntimeCtx = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.arrays.append(arr);
+    }
+
+    pub fn trackMap(self: *RuntimeCtx, m: *JoyaMap) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.maps.append(m);
     }
 
     pub fn trackObject(self: *RuntimeCtx, obj: *JoyaObject) !void {
@@ -427,24 +463,54 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
                     return error.InvalidOperation;
                 },
                 .percent => return Value{ .int = @rem(left.int, right.int) },
-                .lt => return Value{ .bool = left.int < right.int },
-                .gt => return Value{ .bool = left.int > right.int },
-                .lt_eq => return Value{ .bool = left.int <= right.int },
-                .gt_eq => return Value{ .bool = left.int >= right.int },
+                .lt => {
+                    if (left == .int and right == .int) return Value{ .bool = left.int < right.int };
+                    if (left == .float and right == .float) return Value{ .bool = left.float < right.float };
+                    if (left == .float and right == .int) return Value{ .bool = left.float < @as(f64, @floatFromInt(right.int)) };
+                    if (left == .int and right == .float) return Value{ .bool = @as(f64, @floatFromInt(left.int)) < right.float };
+                    if (left == .string and right == .string) return Value{ .bool = std.mem.lessThan(u8, left.string, right.string) };
+                    return error.InvalidOperation;
+                },
+                .gt => {
+                    if (left == .int and right == .int) return Value{ .bool = left.int > right.int };
+                    if (left == .float and right == .float) return Value{ .bool = left.float > right.float };
+                    if (left == .float and right == .int) return Value{ .bool = left.float > @as(f64, @floatFromInt(right.int)) };
+                    if (left == .int and right == .float) return Value{ .bool = @as(f64, @floatFromInt(left.int)) > right.float };
+                    if (left == .string and right == .string) return Value{ .bool = std.mem.lessThan(u8, right.string, left.string) };
+                    return error.InvalidOperation;
+                },
+                .lt_eq => {
+                    if (left == .int and right == .int) return Value{ .bool = left.int <= right.int };
+                    if (left == .float and right == .float) return Value{ .bool = left.float <= right.float };
+                    if (left == .float and right == .int) return Value{ .bool = left.float <= @as(f64, @floatFromInt(right.int)) };
+                    if (left == .int and right == .float) return Value{ .bool = @as(f64, @floatFromInt(left.int)) <= right.float };
+                    return error.InvalidOperation;
+                },
+                .gt_eq => {
+                    if (left == .int and right == .int) return Value{ .bool = left.int >= right.int };
+                    if (left == .float and right == .float) return Value{ .bool = left.float >= right.float };
+                    if (left == .float and right == .int) return Value{ .bool = left.float >= @as(f64, @floatFromInt(right.int)) };
+                    if (left == .int and right == .float) return Value{ .bool = @as(f64, @floatFromInt(left.int)) >= right.float };
+                    return error.InvalidOperation;
+                },
                 .eq_eq => {
                     if (left == .int and right == .int) return Value{ .bool = left.int == right.int };
+                    if (left == .float and right == .float) return Value{ .bool = left.float == right.float };
+                    if (left == .float and right == .int) return Value{ .bool = left.float == @as(f64, @floatFromInt(right.int)) };
+                    if (left == .int and right == .float) return Value{ .bool = @as(f64, @floatFromInt(left.int)) == right.float };
                     if (left == .string and right == .string) return Value{ .bool = std.mem.eql(u8, left.string, right.string) };
                     if (left == .bool and right == .bool) return Value{ .bool = left.bool == right.bool };
-                    if (left == .float and right == .float) return Value{ .bool = left.float == right.float };
                     if (left == .null_val and right == .null_val) return Value{ .bool = true };
                     if (left == .null_val or right == .null_val) return Value{ .bool = false };
                     return Value{ .bool = false };
                 },
                 .not_eq => {
                     if (left == .int and right == .int) return Value{ .bool = left.int != right.int };
+                    if (left == .float and right == .float) return Value{ .bool = left.float != right.float };
+                    if (left == .float and right == .int) return Value{ .bool = left.float != @as(f64, @floatFromInt(right.int)) };
+                    if (left == .int and right == .float) return Value{ .bool = @as(f64, @floatFromInt(left.int)) != right.float };
                     if (left == .string and right == .string) return Value{ .bool = !std.mem.eql(u8, left.string, right.string) };
                     if (left == .bool and right == .bool) return Value{ .bool = left.bool != right.bool };
-                    if (left == .float and right == .float) return Value{ .bool = left.float != right.float };
                     if (left == .null_val and right == .null_val) return Value{ .bool = false };
                     if (left == .null_val or right == .null_val) return Value{ .bool = true };
                     return Value{ .bool = true };
@@ -457,6 +523,11 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
             ch.use_scheduler = scheduler.tls_scheduler != null;
             try ctx.trackChan(ch);
             return Value{ .chan = ch };
+        },
+        .new_map => |nm| {
+            const m = try JoyaMap.init(env.allocator, nm.key_type, nm.value_type);
+            try ctx.trackMap(m);
+            return Value{ .map = m };
         },
         .new_array => |na| {
             const size_val = try eval_expression(env, ctx, na.size.*);
@@ -538,7 +609,36 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
             return error.UndefinedClass;
         },
         .method_call => |mc| {
+            // Check for static method call: ClassName.method(args)
+            // If the object is an identifier that matches a class name, call statically
+            if (mc.object.* == .identifier) {
+                const class_name = mc.object.*.identifier;
+                if (ctx.program) |prog| {
+                    for (prog.classes) |*class| {
+                        if (std.mem.eql(u8, class.name, class_name)) {
+                            return evalStaticMethod(env, ctx, class, mc.method, mc.args);
+                        }
+                    }
+                }
+            }
+
             const obj_val = try eval_expression(env, ctx, mc.object.*);
+
+            // String built-in methods
+            if (obj_val == .string) {
+                return evalStringMethod(env, ctx, obj_val.string, mc.method, mc.args);
+            }
+
+            // Array built-in methods
+            if (obj_val == .array) {
+                return evalArrayMethod(env, ctx, obj_val.array, mc.method, mc.args);
+            }
+
+            // Map built-in methods
+            if (obj_val == .map) {
+                return evalMapMethod(env, ctx, obj_val.map, mc.method, mc.args);
+            }
+
             if (obj_val != .object) return error.NotAnObject;
             const obj = obj_val.object;
             // Find method in the object's class
@@ -681,6 +781,455 @@ const GoCtx = struct {
     body_copy: ast.Statement,
 };
 
+/// Evaluate a built-in string method
+fn evalStringMethod(env: *Environment, ctx: *RuntimeCtx, s: []const u8, method: []const u8, args: []const ast.Expression) !Value {
+    if (std.mem.eql(u8, method, "substring")) {
+        // s.substring(start) or s.substring(start, end)
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const start_val = try eval_expression(env, ctx, args[0]);
+        const start: usize = @intCast(start_val.int);
+        if (args.len >= 2) {
+            const end_val = try eval_expression(env, ctx, args[1]);
+            const end: usize = @intCast(end_val.int);
+            if (start > end or end > s.len) return error.StringIndexOutOfBounds;
+            const result = try env.allocator.dupe(u8, s[start..end]);
+            try ctx.trackString(result);
+            return Value{ .string = result };
+        }
+        if (start > s.len) return error.StringIndexOutOfBounds;
+        const result = try env.allocator.dupe(u8, s[start..]);
+        try ctx.trackString(result);
+        return Value{ .string = result };
+    }
+
+    if (std.mem.eql(u8, method, "indexOf")) {
+        // s.indexOf(sub) → int (-1 if not found)
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const sub_val = try eval_expression(env, ctx, args[0]);
+        if (sub_val != .string) return error.InvalidOperation;
+        if (sub_val.string.len == 0) return Value{ .int = 0 };
+        if (sub_val.string.len > s.len) return Value{ .int = -1 };
+        for (0..(s.len - sub_val.string.len + 1)) |i| {
+            if (std.mem.eql(u8, s[i..][0..sub_val.string.len], sub_val.string)) {
+                return Value{ .int = @intCast(i) };
+            }
+        }
+        return Value{ .int = -1 };
+    }
+
+    if (std.mem.eql(u8, method, "contains")) {
+        // s.contains(sub) → bool
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const sub_val = try eval_expression(env, ctx, args[0]);
+        if (sub_val != .string) return error.InvalidOperation;
+        if (sub_val.string.len == 0) return Value{ .bool = true };
+        if (sub_val.string.len > s.len) return Value{ .bool = false };
+        for (0..(s.len - sub_val.string.len + 1)) |i| {
+            if (std.mem.eql(u8, s[i..][0..sub_val.string.len], sub_val.string)) {
+                return Value{ .bool = true };
+            }
+        }
+        return Value{ .bool = false };
+    }
+
+    if (std.mem.eql(u8, method, "startsWith")) {
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const prefix_val = try eval_expression(env, ctx, args[0]);
+        if (prefix_val != .string) return error.InvalidOperation;
+        return Value{ .bool = std.mem.startsWith(u8, s, prefix_val.string) };
+    }
+
+    if (std.mem.eql(u8, method, "endsWith")) {
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const suffix_val = try eval_expression(env, ctx, args[0]);
+        if (suffix_val != .string) return error.InvalidOperation;
+        return Value{ .bool = std.mem.endsWith(u8, s, suffix_val.string) };
+    }
+
+    if (std.mem.eql(u8, method, "toUpperCase")) {
+        const result = try env.allocator.dupe(u8, s);
+        for (result) |*ch| {
+            if (ch.* >= 'a' and ch.* <= 'z') ch.* = ch.* - 32;
+        }
+        try ctx.trackString(result);
+        return Value{ .string = result };
+    }
+
+    if (std.mem.eql(u8, method, "toLowerCase")) {
+        const result = try env.allocator.dupe(u8, s);
+        for (result) |*ch| {
+            if (ch.* >= 'A' and ch.* <= 'Z') ch.* = ch.* + 32;
+        }
+        try ctx.trackString(result);
+        return Value{ .string = result };
+    }
+
+    if (std.mem.eql(u8, method, "trim")) {
+        var start: usize = 0;
+        while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r')) {
+            start += 1;
+        }
+        var end: usize = s.len;
+        while (end > start and (s[end - 1] == ' ' or s[end - 1] == '\t' or s[end - 1] == '\n' or s[end - 1] == '\r')) {
+            end -= 1;
+        }
+        const result = try env.allocator.dupe(u8, s[start..end]);
+        try ctx.trackString(result);
+        return Value{ .string = result };
+    }
+
+    if (std.mem.eql(u8, method, "replace")) {
+        // s.replace(old, new) → string
+        if (args.len < 2) return error.WrongNumberOfArguments;
+        const old_val = try eval_expression(env, ctx, args[0]);
+        const new_val = try eval_expression(env, ctx, args[1]);
+        if (old_val != .string or new_val != .string) return error.InvalidOperation;
+        const old_str = old_val.string;
+        const new_str = new_val.string;
+        if (old_str.len == 0) {
+            const result = try env.allocator.dupe(u8, s);
+            try ctx.trackString(result);
+            return Value{ .string = result };
+        }
+        // Count occurrences to size the result buffer
+        var count: usize = 0;
+        var i: usize = 0;
+        while (i + old_str.len <= s.len) {
+            if (std.mem.eql(u8, s[i..][0..old_str.len], old_str)) {
+                count += 1;
+                i += old_str.len;
+            } else {
+                i += 1;
+            }
+        }
+        const new_len = s.len + count * new_str.len - count * old_str.len;
+        var buf = try env.allocator.alloc(u8, new_len);
+        var src: usize = 0;
+        var dst: usize = 0;
+        while (src + old_str.len <= s.len) {
+            if (std.mem.eql(u8, s[src..][0..old_str.len], old_str)) {
+                @memcpy(buf[dst..][0..new_str.len], new_str);
+                dst += new_str.len;
+                src += old_str.len;
+            } else {
+                buf[dst] = s[src];
+                dst += 1;
+                src += 1;
+            }
+        }
+        while (src < s.len) : (src += 1) {
+            buf[dst] = s[src];
+            dst += 1;
+        }
+        try ctx.trackString(buf);
+        return Value{ .string = buf };
+    }
+
+    if (std.mem.eql(u8, method, "split")) {
+        // s.split(delim) → string[]
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const delim_val = try eval_expression(env, ctx, args[0]);
+        if (delim_val != .string) return error.InvalidOperation;
+        const delim = delim_val.string;
+        const arr = try JoyaArray.init(env.allocator, .{ .string = {} }, 0, .void);
+        if (delim.len == 0) {
+            // Split into individual characters
+            for (s) |ch| {
+                const single = try env.allocator.dupe(u8, &[_]u8{ch});
+                try ctx.trackString(single);
+                try arr.items.append(Value{ .string = single });
+            }
+        } else {
+            var start: usize = 0;
+            while (start < s.len) {
+                var found = false;
+                for (0..(s.len - start + 1)) |offset| {
+                    if (start + offset + delim.len <= s.len and
+                        std.mem.eql(u8, s[start + offset..][0..delim.len], delim))
+                    {
+                        const part = try env.allocator.dupe(u8, s[start .. start + offset]);
+                        try ctx.trackString(part);
+                        try arr.items.append(Value{ .string = part });
+                        start = start + offset + delim.len;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    const part = try env.allocator.dupe(u8, s[start..]);
+                    try ctx.trackString(part);
+                    try arr.items.append(Value{ .string = part });
+                    break;
+                }
+            }
+        }
+        try ctx.trackArray(arr);
+        return Value{ .array = arr };
+    }
+
+    return error.UndefinedStringMethod;
+}
+
+/// Evaluate a built-in array method
+fn evalArrayMethod(env: *Environment, ctx: *RuntimeCtx, arr: *JoyaArray, method: []const u8, args: []const ast.Expression) !Value {
+    if (std.mem.eql(u8, method, "push")) {
+        // arr.push(val) — append value
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const val = try eval_expression(env, ctx, args[0]);
+        try arr.items.append(val);
+        return Value{ .int = @intCast(arr.items.items.len) };
+    }
+
+    if (std.mem.eql(u8, method, "pop")) {
+        // arr.pop() → value
+        if (arr.items.items.len == 0) return Value{ .null_val = {} };
+        return arr.items.pop();
+    }
+
+    if (std.mem.eql(u8, method, "contains")) {
+        // arr.contains(val) → bool
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const val = try eval_expression(env, ctx, args[0]);
+        for (arr.items.items) |item| {
+            if (val == .int and item == .int and val.int == item.int) return Value{ .bool = true };
+            if (val == .string and item == .string and std.mem.eql(u8, val.string, item.string)) return Value{ .bool = true };
+            if (val == .bool and item == .bool and val.bool == item.bool) return Value{ .bool = true };
+        }
+        return Value{ .bool = false };
+    }
+
+    if (std.mem.eql(u8, method, "indexOf")) {
+        // arr.indexOf(val) → int (-1 if not found)
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const val = try eval_expression(env, ctx, args[0]);
+        for (arr.items.items, 0..) |item, i| {
+            if (val == .int and item == .int and val.int == item.int) return Value{ .int = @intCast(i) };
+            if (val == .string and item == .string and std.mem.eql(u8, val.string, item.string)) return Value{ .int = @intCast(i) };
+            if (val == .bool and item == .bool and val.bool == item.bool) return Value{ .int = @intCast(i) };
+        }
+        return Value{ .int = -1 };
+    }
+
+    if (std.mem.eql(u8, method, "join")) {
+        // arr.join(sep) → string
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const sep_val = try eval_expression(env, ctx, args[0]);
+        if (sep_val != .string) return error.InvalidOperation;
+        var buf = std.ArrayList(u8).init(env.allocator);
+        for (arr.items.items, 0..) |item, i| {
+            if (i > 0) try buf.appendSlice(sep_val.string);
+            switch (item) {
+                .int => try buf.writer().print("{}", .{item.int}),
+                .string => try buf.appendSlice(item.string),
+                .bool => try buf.writer().print("{}", .{item.bool}),
+                .float => try buf.writer().print("{}", .{item.float}),
+                .null_val => try buf.appendSlice("null"),
+                else => try buf.writer().print("?", .{}),
+            }
+        }
+        const result = try buf.toOwnedSlice();
+        try ctx.trackString(result);
+        return Value{ .string = result };
+    }
+
+    if (std.mem.eql(u8, method, "removeAt")) {
+        // arr.removeAt(index) → value
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const idx_val = try eval_expression(env, ctx, args[0]);
+        const idx: usize = @intCast(idx_val.int);
+        if (idx >= arr.items.items.len) return error.ArrayIndexOutOfBounds;
+        return arr.items.orderedRemove(idx);
+    }
+
+    if (std.mem.eql(u8, method, "reverse")) {
+        // arr.reverse() — in-place reverse
+        var i: usize = 0;
+        var j: usize = arr.items.items.len;
+        if (j == 0) return Value.void;
+        j -= 1;
+        while (i < j) {
+            const tmp = arr.items.items[i];
+            arr.items.items[i] = arr.items.items[j];
+            arr.items.items[j] = tmp;
+            i += 1;
+            if (j == 0) break;
+            j -= 1;
+        }
+        return Value.void;
+    }
+
+    if (std.mem.eql(u8, method, "sort")) {
+        // arr.sort() — in-place ascending sort (int only for now)
+        // Simple insertion sort
+        const items = arr.items.items;
+        for (1..items.len) |i| {
+            const key = items[i];
+            var j: usize = i;
+            while (j > 0) : (j -= 1) {
+                const should_swap = switch (items[j - 1]) {
+                    .int => key == .int and items[j - 1].int > key.int,
+                    .float => key == .float and items[j - 1].float > key.float,
+                    .string => key == .string and std.mem.lessThan(u8, items[j - 1].string, key.string) == false and !std.mem.eql(u8, items[j - 1].string, key.string),
+                    else => false,
+                };
+                if (should_swap) {
+                    items[j] = items[j - 1];
+                } else break;
+            }
+            items[j] = key;
+        }
+        return Value.void;
+    }
+
+    return error.UndefinedArrayMethod;
+}
+
+/// Evaluate a built-in map method
+fn evalMapMethod(env: *Environment, ctx: *RuntimeCtx, m: *JoyaMap, method: []const u8, args: []const ast.Expression) !Value {
+    if (std.mem.eql(u8, method, "put")) {
+        // m.put(key, value)
+        if (args.len < 2) return error.WrongNumberOfArguments;
+        const key_val = try eval_expression(env, ctx, args[0]);
+        const val = try eval_expression(env, ctx, args[1]);
+        // Convert key to string representation for HashMap
+        const key_str = try valueToMapKey(env, ctx, key_val);
+        try m.entries.put(key_str, val);
+        return Value.void;
+    }
+
+    if (std.mem.eql(u8, method, "get")) {
+        // m.get(key) → value or null
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const key_val = try eval_expression(env, ctx, args[0]);
+        const key_str = try valueToMapKey(env, ctx, key_val);
+        return m.entries.get(key_str) orelse Value{ .null_val = {} };
+    }
+
+    if (std.mem.eql(u8, method, "remove")) {
+        // m.remove(key) → value or null
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const key_val = try eval_expression(env, ctx, args[0]);
+        const key_str = try valueToMapKey(env, ctx, key_val);
+        if (m.entries.fetchRemove(key_str)) |entry| {
+            return entry.value;
+        }
+        return Value{ .null_val = {} };
+    }
+
+    if (std.mem.eql(u8, method, "containsKey")) {
+        // m.containsKey(key) → bool
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const key_val = try eval_expression(env, ctx, args[0]);
+        const key_str = try valueToMapKey(env, ctx, key_val);
+        return Value{ .bool = m.entries.contains(key_str) };
+    }
+
+    if (std.mem.eql(u8, method, "size")) {
+        // m.size() → int
+        return Value{ .int = @intCast(m.entries.count()) };
+    }
+
+    if (std.mem.eql(u8, method, "isEmpty")) {
+        // m.isEmpty() → bool
+        return Value{ .bool = m.entries.count() == 0 };
+    }
+
+    if (std.mem.eql(u8, method, "keys")) {
+        // m.keys() → array of keys (as strings)
+        const arr = try JoyaArray.init(env.allocator, .{ .string = {} }, 0, .void);
+        var iter = m.entries.keyIterator();
+        while (iter.next()) |key| {
+            const key_copy = try env.allocator.dupe(u8, key.*);
+            try ctx.trackString(key_copy);
+            try arr.items.append(Value{ .string = key_copy });
+        }
+        try ctx.trackArray(arr);
+        return Value{ .array = arr };
+    }
+
+    if (std.mem.eql(u8, method, "values")) {
+        // m.values() → array of values
+        const arr = try JoyaArray.init(env.allocator, .void, 0, .void);
+        var iter = m.entries.valueIterator();
+        while (iter.next()) |val| {
+            try arr.items.append(val.*);
+        }
+        try ctx.trackArray(arr);
+        return Value{ .array = arr };
+    }
+
+    if (std.mem.eql(u8, method, "clear")) {
+        // m.clear()
+        m.entries.clearRetainingCapacity();
+        return Value.void;
+    }
+
+    return error.UndefinedMapMethod;
+}
+
+/// Evaluate a static method call: ClassName.method(args)
+/// No 'this' binding — the method runs in a clean environment
+fn evalStaticMethod(env: *Environment, ctx: *RuntimeCtx, class: *const ast.Class, method_name: []const u8, args: []const ast.Expression) !Value {
+    for (class.methods) |*method| {
+        if (std.mem.eql(u8, method.name, method_name)) {
+            // Evaluate arguments
+            var arg_vals = std.ArrayList(Value).init(env.allocator);
+            defer arg_vals.deinit();
+            for (args) |arg_expr| {
+                try arg_vals.append(try eval_expression(env, ctx, arg_expr));
+            }
+            // Create method environment without 'this'
+            var method_env = Environment.init(env.allocator);
+            for (method.params, 0..) |param, i| {
+                if (i < arg_vals.items.len) {
+                    try method_env.set(param.name, arg_vals.items[i]);
+                }
+            }
+            ctx.return_value = null;
+            var local_threads = std.ArrayList(std.Thread).init(env.allocator);
+            const result = execute_statement(&method_env, ctx, method.body, &local_threads);
+            for (local_threads.items) |t| t.join();
+            method_env.deinit();
+            _ = result catch |err| switch (err) {
+                error.ReturnSignal => {},
+                else => return err,
+            };
+            const return_val = ctx.return_value orelse Value.void;
+            ctx.return_value = null;
+            return return_val;
+        }
+    }
+    return error.UndefinedMethod;
+}
+
+/// Convert a Value to a string key for use in the map's StringHashMap.
+/// int → "42", string → "hello", bool → "true"/"false", float → "3.14"
+fn valueToMapKey(env: *Environment, ctx: *RuntimeCtx, val: Value) ![]const u8 {
+    switch (val) {
+        .int => {
+            var buf = std.ArrayList(u8).init(env.allocator);
+            try buf.writer().print("{}", .{val.int});
+            const result = try buf.toOwnedSlice();
+            try ctx.trackString(result);
+            return result;
+        },
+        .string => return val.string,
+        .bool => {
+            const result = try env.allocator.dupe(u8, if (val.bool) "true" else "false");
+            try ctx.trackString(result);
+            return result;
+        },
+        .float => {
+            var buf = std.ArrayList(u8).init(env.allocator);
+            try buf.writer().print("{}", .{val.float});
+            const result = try buf.toOwnedSlice();
+            try ctx.trackString(result);
+            return result;
+        },
+        else => return error.InvalidMapKey,
+    }
+}
+
 fn goRoutineEntry(_: *scheduler.Goroutine, user_data: ?*anyopaque) void {
     const ctx: *GoCtx = @ptrCast(@alignCast(user_data orelse return));
     var local_env = ctx.env_copy;
@@ -708,6 +1257,18 @@ fn printValue(val: Value, newline: bool) !void {
             if (newline) std.debug.print("]\n", .{}) else std.debug.print("]", .{});
         },
         .chan => if (newline) std.debug.print("<chan>\n", .{}) else std.debug.print("<chan>", .{}),
+        .map => {
+            std.debug.print("{{", .{});
+            var i: usize = 0;
+            var iter = val.map.entries.iterator();
+            while (iter.next()) |entry| {
+                if (i > 0) std.debug.print(", ", .{});
+                std.debug.print("{s}: ", .{entry.key_ptr.*});
+                try printValue(entry.value_ptr.*, false);
+                i += 1;
+            }
+            if (newline) std.debug.print("}}\n", .{}) else std.debug.print("}}", .{});
+        },
         .object => if (newline) std.debug.print("<{s} object>\n", .{val.object.class_name}) else std.debug.print("<{s} object>", .{val.object.class_name}),
         .null_val => if (newline) std.debug.print("null\n", .{}) else std.debug.print("null", .{}),
         .void => {},
@@ -836,6 +1397,44 @@ fn execute_statement(env: *Environment, ctx: *RuntimeCtx, stmt: ast.Statement, t
         },
         .break_stmt => return error.BreakSignal,
         .continue_stmt => return error.ContinueSignal,
+        .throw_stmt => |expr| {
+            const val = try eval_expression(env, ctx, expr);
+            ctx.thrown_value = val;
+            return error.ThrowSignal;
+        },
+        .try_stmt => |ts| {
+            // Execute try block
+            const try_result = execute_statement(env, ctx, ts.try_block.*, threads);
+            if (try_result) |_| {
+                // try block succeeded — run finally if present
+                if (ts.finally_block) |fb| {
+                    try execute_statement(env, ctx, fb.*, threads);
+                }
+            } else |err| switch (err) {
+                error.ThrowSignal => {
+                    // Caught! Execute catch block with the thrown value bound to catch_var
+                    const thrown = ctx.thrown_value orelse Value{ .null_val = {} };
+                    ctx.thrown_value = null;
+                    try env.set(ts.catch_var, thrown);
+                    const catch_result = execute_statement(env, ctx, ts.catch_block.*, threads);
+                    if (ts.finally_block) |fb| {
+                        try execute_statement(env, ctx, fb.*, threads);
+                    }
+                    // If catch block threw or returned, propagate that
+                    _ = catch_result catch |catch_err| switch (catch_err) {
+                        error.ThrowSignal, error.ReturnSignal, error.BreakSignal, error.ContinueSignal => return catch_err,
+                        else => return catch_err,
+                    };
+                },
+                else => {
+                    // Not a ThrowSignal — still run finally, then propagate the original error
+                    if (ts.finally_block) |fb| {
+                        try execute_statement(env, ctx, fb.*, threads);
+                    }
+                    return err;
+                },
+            }
+        },
         .print_stmt => |ps| {
             const val = try eval_expression(env, ctx, ps.expr);
             try printValue(val, ps.newline);

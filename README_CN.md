@@ -17,6 +17,8 @@ Joya 是一门系统级编程语言，旨在融合 Java 熟悉的面向对象语
 | 性能 | JVM 开销 | 原生，快 | **原生执行（LLVM，计划中）** |
 | 调度器 | OS 线程（每个 ~1MB 栈） | M:N 协程 | **M:N 协程（Fiber 实现）** |
 | 跨平台 | JVM（跨平台） | 原生（跨平台） | **Windows / Linux / macOS** |
+| 错误处理 | try/catch/finally | defer + errors | **try/catch/finally + throw** |
+| 模块 | packages | packages | **import + lib/ 约定** |
 | 学习成本 | — | 新范式 | **Java 开发者零成本** |
 
 Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新的语法。Joya 让你在最熟悉的结构里，用 Go 风格的并发模型写出高效并发程序。
@@ -27,6 +29,8 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 - **天生并发** — `go {}` 启动协程，`chan<T>` 连接协程。无需手动管锁和线程池。
 - **轻量调度** — M:N 用户态协程调度器。数万协程运行在少数 OS 线程上。
 - **跨平台** — 运行于 Windows、Linux、macOS。调度器自动适配各平台。
+- **丰富的标准操作** — 字符串方法、数组方法、字典、错误处理、复合赋值运算符。
+- **模块化** — `import` 跨文件组织代码，`lib/` 目录约定存放可复用模块。
 - **高性能** — 通过 LLVM 编译为独立原生可执行文件（计划中）。无运行时，无虚拟机。
 - **安全** — 垃圾回收保证内存安全。无悬垂指针，无数据竞争。
 - **简洁** — 最少样板代码。`public static void main()` 即可开始。
@@ -37,27 +41,28 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 
 ### 阶段一：解释器原型 — 已完成
 
-完整可运行的树遍历式解释器，支持数组、对象、方法调用和并发。
-
 | 功能 | 状态 |
 |------|------|
-| **词法分析器**（28+ 关键字、运算符、注释） | ✅ |
+| **词法分析器**（32+ 关键字、运算符、注释） | ✅ |
 | **递归下降解析器**（优先级爬升法） | ✅ |
 | **AST**（Expression、Statement、Method、Class、Program） | ✅ |
 | **树遍历式解释器** | ✅ |
-| **数据类型**：int、string、bool、float、数组、对象、chan | ✅ |
-| **数组**：`new int[5]`、`[1,2,3]` 字面量、`arr[i]`、`arr.length` | ✅ |
+| **数据类型**：int、string、bool、float、数组、对象、chan、map | ✅ |
+| **数组**：`new int[5]`、`[1,2,3]` 字面量、`arr[i]`、`arr.length`、8 个内置方法 | ✅ |
+| **字符串**：`s.length`、`s[0]`、比较、拼接、10 个内置方法 | ✅ |
+| **字典**：`map<K,V>`、`new map<K,V>()`、9 个内置方法 | ✅ |
 | **for-each**：`for (int x : arr) { ... }` | ✅ |
-| **字符串操作**：`s.length`、`s[0]`、字符串比较、拼接 | ✅ |
 | **方法**：参数传递、返回值、嵌套调用 | ✅ |
 | **类**：字段、构造函数、`this`、`new ClassName(args)` | ✅ |
-| **方法调用**：`obj.method(args)`，自动绑定 `this` | ✅ |
+| **静态方法**：`ClassName.method(args)` 无需创建对象 | ✅ |
 | **null 值**：`null` 字面量、`== null` 比较 | ✅ |
 | **控制流**：`for`、`while`、`for-each`、`if/else if/else`、`return`、`break`、`continue` | ✅ |
+| **错误处理**：`throw`、`try/catch(string e)/finally` | ✅ |
 | **布尔逻辑**：`&&`、`\|\|`、`!`（短路求值） | ✅ |
-| **算术运算**：int/float 混合运算、`%` 取模 | ✅ |
+| **算术运算**：int/float 混合运算、`%` 取模、`+= -= *= /= %=` | ✅ |
 | **`go {}` 协程**（用户态 M:N 调度器） | ✅ |
 | **`chan<T>` 带缓冲通道**（阻塞时让出 CPU，唤醒时重新入队） | ✅ |
+| **模块**：`import ModuleName;`、多文件程序、`lib/` 搜索路径 | ✅ |
 | **注释**：`//` 行注释、`/* */` 嵌套块注释 | ✅ |
 | **内存管理**：Arena + ThreadSafeAlloc，零泄漏 | ✅ |
 
@@ -104,6 +109,7 @@ M:N 协程调度器，支持跨平台 Fiber 上下文切换。
 | **1** | 解释器原型 — 验证语法与并发语义 | ✅ 已完成 |
 | **2** | 用户态协程调度器（M:N，Fiber 实现） | ✅ 已完成 |
 | **2.5** | 跨平台 Fiber 抽象层（Windows/Linux/macOS） | ✅ 已完成 |
+| **2.6** | 语言特性：字典、错误处理、import、复合赋值 | ✅ 已完成 |
 | **3** | LLVM 后端 — 编译为原生可执行文件 | 🔜 下一阶段 |
 | **4** | 自举 — 用 Joya 重写编译器 | 📋 计划中 |
 
@@ -129,7 +135,7 @@ public class Main {
         int total = 0;
         for (int i = 0; i < 1000; i++) {
             int val = receive(ch);
-            total = total + val;
+            total += val;
         }
         // total = 0+1+2+...+999 = 499500
         println("1000 协程总和: " + total);
@@ -142,44 +148,87 @@ public class Main {
 PASSED!
 ```
 
-### 协程 + 通道
+### 错误处理
 
 ```java
+try {
+    throw "something went wrong";
+} catch(string e) {
+    println("捕获异常: " + e);
+} finally {
+    println("无论如何都会执行");
+}
+
+// 带错误处理的方法
+static int divide(int a, int b) {
+    if (b == 0) throw "division by zero";
+    return a / b;
+}
+
+try {
+    int result = divide(10, 0);
+} catch(string e) {
+    println("错误: " + e);  // 错误: division by zero
+}
+```
+
+### 字典
+
+```java
+map<string, int> scores = new map<string, int>();
+scores.put("Alice", 95);
+scores.put("Bob", 87);
+
+println(scores.get("Alice"));       // 95
+println(scores.containsKey("Bob")); // true
+println(scores.size());             // 2
+
+string[] keys = scores.keys();
+int[] vals = scores.values();
+```
+
+### 字符串与数组方法
+
+```java
+string s = "Hello World";
+println(s.substring(0, 5));       // Hello
+println(s.indexOf("World"));      // 6
+println(s.contains("World"));     // true
+println(s.toUpperCase());         // HELLO WORLD
+println(s.trim());                // Hello World（去除首尾空白）
+println(s.replace("World", "Joya")); // Hello Joya
+
+string[] parts = "a,b,c".split(",");  // ["a", "b", "c"]
+
+int[] arr = [5, 3, 1, 4, 2];
+arr.sort();                       // [1, 2, 3, 4, 5]
+arr.reverse();                    // [5, 4, 3, 2, 1]
+arr.push(6);
+println(arr.join(", "));          // 5, 4, 3, 2, 1, 6
+```
+
+### 模块/Import
+
+```java
+// 在 examples/lib/Math.joya 中
+class Math {
+    static int max(int a, int b) {
+        if (a > b) return a;
+        return b;
+    }
+}
+
+// 在主文件中
+import Math;
+
 public class Main {
     public static void main() {
-        chan<int> ch = new chan<int>(2);
-
-        go {
-            for (int i = 0; i < 3; i++) {
-                send(ch, i * 10);
-                println("sent: " + (i * 10));
-            }
-            close(ch);
-        };
-
-        for (int i = 0; i < 3; i++) {
-            int val = receive(ch);
-            println("received: " + val);
-        }
+        println(Math.max(10, 20));  // 20
     }
 }
 ```
 
-```
-sent: 0      received: 0
-sent: 10     received: 10
-sent: 20     received: 20
-```
-
-### 数组与 for-each
-
-```java
-int[] nums = [10, 20, 30, 40, 50];
-for (int n : nums) {
-    println(n);
-}
-println("长度: " + nums.length);
-```
+import 搜索主文件所在目录和 `lib/` 子目录。支持嵌套导入和循环检测。
 
 ### 类与对象
 
@@ -192,7 +241,7 @@ class Calculator {
     }
 
     int add(int x) {
-        this.value = this.value + x;
+        this.value += x;     // 复合赋值
         return this.value;
     }
 }
@@ -200,31 +249,6 @@ class Calculator {
 Calculator calc = new Calculator(10);
 println(calc.add(5));      // 15
 println(calc.value);       // 15
-```
-
-### 并发排序
-
-```java
-public class Main {
-    public static void main() {
-        int[] data = [64, 34, 25, 12, 22, 11, 90, 45, 78, 33];
-
-        // 通过协程 + 通道并行求和
-        chan<int> ch = new chan<int>(2);
-        go {
-            send(ch, partialSum(data, 0, 5));
-        };
-        go {
-            send(ch, partialSum(data, 5, 10));
-        };
-        println("总和: " + (receive(ch) + receive(ch)));
-
-        bubbleSort(data);
-    }
-
-    static int partialSum(int[] arr, int start, int end) { ... }
-    static void bubbleSort(int[] arr) { ... }
-}
 ```
 
 ### 语法一览
@@ -239,6 +263,17 @@ public class Main {
         float pi = 3.14;
         int[] arr = new int[5];
         chan<int> ch = new chan<int>(10);
+        map<string, int> scores = new map<string, int>();
+
+        // 复合赋值
+        x += 5;          // x = 20
+        x -= 3;          // x = 17
+        string s = "Hello";
+        s += " World";   // s = "Hello World"
+
+        // 比较（int、float、string）
+        println(3.14 > 2.71);       // true
+        println("abc" < "abd");     // true
 
         // 控制流
         if (x > 20) {
@@ -249,23 +284,12 @@ public class Main {
             println("小");
         }
 
-        // 循环与 break/continue
-        for (int i = 0; i < 10; i++) {
-            if (i % 2 == 0) continue;
-            if (i > 7) break;
-            println(i);  // 1 3 5 7
+        // 错误处理
+        try {
+            if (x < 0) throw "负数值";
+        } catch(string e) {
+            println("错误: " + e);
         }
-
-        // for-each
-        string[] names = ["Alice", "Bob"];
-        for (string n : names) {
-            println(n);
-        }
-
-        // 字符串操作
-        string s = "hello";
-        println(s.length);   // 5
-        println(s[0]);       // h
 
         // null 值
         int val = null;
@@ -315,8 +339,8 @@ joya/
 ├── joya.md                # 语言规范文档
 ├── 修改记录.md             # 开发修改记录
 ├── src/
-│   ├── main.zig           # 程序入口
-│   ├── lexer.zig          # 词法分析器（28+ 关键字）
+│   ├── main.zig           # 程序入口 + import 系统
+│   ├── lexer.zig          # 词法分析器（32+ 关键字）
 │   ├── ast.zig            # AST 结构定义
 │   ├── parser.zig         # 递归下降解析器（优先级爬升法）
 │   ├── fiber.zig          # 跨平台 Fiber 抽象层（comptime 选择后端）
@@ -325,7 +349,7 @@ joya/
 │   ├── fiber_ucontext.c   # 汇编上下文切换 C shim（x86_64 / aarch64）
 │   ├── fiber_fallback.zig # 兜底后端（占位，自动回退 OS 线程）
 │   ├── scheduler.zig      # M:N 协程调度器（平台无关）
-│   └── interpreter.zig    # 解释器核心（对象、数组、通道、调度器集成）
+│   └── interpreter.zig    # 解释器核心（对象、数组、通道、字典、错误处理）
 └── examples/
     ├── hello.joya         # 协程与通道示例
     ├── features.joya      # 特性展示
@@ -338,7 +362,16 @@ joya/
     ├── test_break.joya    # break/continue 测试
     ├── test_class.joya    # 对象与多类测试
     ├── test_class_min.joya # 最小 this.field 测试
-    └── test_if.joya       # if/else 测试
+    ├── test_if.joya       # if/else 测试
+    ├── test_compare.joya  # float/string 比较测试
+    ├── test_string_methods.joya # 字符串方法测试
+    ├── test_map.joya      # 字典测试
+    ├── test_error.joya    # 错误处理测试
+    ├── test_compound.joya # 复合赋值测试
+    ├── test_import.joya   # 模块/import 测试
+    └── lib/
+        ├── Math.joya      # 数学工具类
+        └── Utils.joya     # 通用工具类
 ```
 
 ## 📄 开源协议

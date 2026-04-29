@@ -1,0 +1,53 @@
+public class Main {
+    public static void main() {
+        // Create a map
+        map<string, int> scores = new map<string, int>();
+
+        // put
+        scores.put("Alice", 95);
+        scores.put("Bob", 87);
+        scores.put("Charlie", 92);
+
+        // get
+        println(scores.get("Alice"));       // 95
+        println(scores.get("Bob"));         // 87
+        println(scores.get("Unknown"));     // null
+
+        // containsKey
+        println(scores.containsKey("Alice"));    // true
+        println(scores.containsKey("David"));    // false
+
+        // size
+        println(scores.size());              // 3
+
+        // isEmpty
+        println(scores.isEmpty());           // false
+
+        // remove
+        int bob_score = scores.remove("Bob");
+        println(bob_score);                  // 87
+        println(scores.size());              // 2
+        println(scores.containsKey("Bob"));  // false
+
+        // keys
+        string[] ks = scores.keys();
+        println(ks.length);                 // 2
+
+        // values
+        int[] vals = scores.values();
+        println(vals.length);               // 2
+
+        // clear
+        scores.clear();
+        println(scores.size());              // 0
+        println(scores.isEmpty());           // true
+
+        // int-keyed map
+        map<int, string> names = new map<int, string>();
+        names.put(1, "one");
+        names.put(2, "two");
+        println(names.get(1));              // one
+        println(names.get(2));              // two
+        println(names.containsKey(3));      // false
+    }
+}

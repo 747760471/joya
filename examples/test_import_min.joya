@@ -1,0 +1,8 @@
+import Math;
+
+public class Main {
+    public static void main() {
+        int result = Math.max(10, 20);
+        println(result);
+    }
+}

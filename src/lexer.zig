@@ -29,12 +29,23 @@ pub const TokenType = enum {
     keyword_break,
     keyword_continue,
     keyword_this,
+    keyword_map,
+    keyword_try,
+    keyword_catch,
+    keyword_finally,
+    keyword_throw,
+    keyword_import,
 
     plus,
     minus,
     star,
     slash,
     percent,
+    plus_eq,
+    minus_eq,
+    star_eq,
+    slash_eq,
+    percent_eq,
     eq,
     eq_eq,
     not_eq,
@@ -106,6 +117,12 @@ pub const Lexer = struct {
         .{ "break", .keyword_break },
         .{ "continue", .keyword_continue },
         .{ "this", .keyword_this },
+        .{ "map", .keyword_map },
+        .{ "try", .keyword_try },
+        .{ "catch", .keyword_catch },
+        .{ "finally", .keyword_finally },
+        .{ "throw", .keyword_throw },
+        .{ "import", .keyword_import },
     });
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Lexer {
@@ -232,15 +249,30 @@ pub const Lexer = struct {
                 },
                 '+' => {
                     _ = self.next();
-                    try self.tokens.append(.{ .typ = .plus, .value = "+", .line = self.line });
+                    if (self.peek() == '=') {
+                        _ = self.next();
+                        try self.tokens.append(.{ .typ = .plus_eq, .value = "+=", .line = self.line });
+                    } else {
+                        try self.tokens.append(.{ .typ = .plus, .value = "+", .line = self.line });
+                    }
                 },
                 '-' => {
                     _ = self.next();
-                    try self.tokens.append(.{ .typ = .minus, .value = "-", .line = self.line });
+                    if (self.peek() == '=') {
+                        _ = self.next();
+                        try self.tokens.append(.{ .typ = .minus_eq, .value = "-=", .line = self.line });
+                    } else {
+                        try self.tokens.append(.{ .typ = .minus, .value = "-", .line = self.line });
+                    }
                 },
                 '*' => {
                     _ = self.next();
-                    try self.tokens.append(.{ .typ = .star, .value = "*", .line = self.line });
+                    if (self.peek() == '=') {
+                        _ = self.next();
+                        try self.tokens.append(.{ .typ = .star_eq, .value = "*=", .line = self.line });
+                    } else {
+                        try self.tokens.append(.{ .typ = .star, .value = "*", .line = self.line });
+                    }
                 },
                 '/' => {
                     _ = self.next();
@@ -274,6 +306,11 @@ pub const Lexer = struct {
                                 _ = self.next();
                             }
                         }
+                    }
+                    // Division assign /=
+                    else if (self.peek() == '=') {
+                        _ = self.next();
+                        try self.tokens.append(.{ .typ = .slash_eq, .value = "/=", .line = self.line });
                     }
                     // Division operator
                     else {
@@ -358,7 +395,12 @@ pub const Lexer = struct {
                 },
                 '%' => {
                     _ = self.next();
-                    try self.tokens.append(.{ .typ = .percent, .value = "%", .line = self.line });
+                    if (self.peek() == '=') {
+                        _ = self.next();
+                        try self.tokens.append(.{ .typ = .percent_eq, .value = "%=", .line = self.line });
+                    } else {
+                        try self.tokens.append(.{ .typ = .percent, .value = "%", .line = self.line });
+                    }
                 },
                 '&' => {
                     _ = self.next();

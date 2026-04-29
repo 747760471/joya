@@ -66,7 +66,8 @@ pub const Parser = struct {
             self.check(.keyword_bool) or
             self.check(.keyword_float) or
             self.check(.keyword_void) or
-            self.check(.keyword_chan);
+            self.check(.keyword_chan) or
+            self.check(.keyword_map);
     }
 
     /// Parse a base type without [] suffix (used by new T[size] and type declarations)
@@ -84,6 +85,19 @@ pub const Parser = struct {
             const chan_type = try self.allocator.create(ast.Type);
             chan_type.* = elem_type;
             return ast.Type{ .chan = chan_type };
+        }
+        if (self.check(.keyword_map)) {
+            _ = self.advance();
+            _ = try self.expect(.lt);
+            const key_type = try self.parseType();
+            _ = try self.expect(.comma);
+            const value_type = try self.parseType();
+            _ = try self.expect(.gt);
+            const key_ptr = try self.allocator.create(ast.Type);
+            key_ptr.* = key_type;
+            const val_ptr = try self.allocator.create(ast.Type);
+            val_ptr.* = value_type;
+            return ast.Type{ .map = .{ .key = key_ptr, .value = val_ptr } };
         }
         // Class type: identifier used as type name
         if (self.check(.identifier)) {
@@ -270,6 +284,20 @@ pub const Parser = struct {
                     .new_chan = .{ .elem_type = elem_type, .capacity = capacity },
                 };
             }
+            // new map<K,V>()
+            if (self.check(.keyword_map)) {
+                _ = self.advance();
+                _ = try self.expect(.lt);
+                const key_type = try self.parseType();
+                _ = try self.expect(.comma);
+                const value_type = try self.parseType();
+                _ = try self.expect(.gt);
+                _ = try self.expect(.l_paren);
+                _ = try self.expect(.r_paren);
+                return ast.Expression{
+                    .new_map = .{ .key_type = key_type, .value_type = value_type },
+                };
+            }
             // new ClassName(args) — object creation (identifier followed by `(`)
             if (self.check(.identifier)) {
                 // Lookahead: is next token `(` (object) or `[` (array of class type)?
@@ -453,6 +481,8 @@ pub const Parser = struct {
         if (self.check(.keyword_return)) return self.parseReturnStmt();
         if (self.check(.keyword_break)) return self.parseBreakStmt();
         if (self.check(.keyword_continue)) return self.parseContinueStmt();
+        if (self.check(.keyword_throw)) return self.parseThrowStmt();
+        if (self.check(.keyword_try)) return self.parseTryStmt();
         if (self.check(.keyword_print) or self.check(.keyword_println)) return self.parsePrintStmt();
         if (self.check(.keyword_this)) return self.parseThisAssignOrExpr();
         if (self.isTypeStart()) return self.parseVarDecl();
@@ -533,6 +563,33 @@ pub const Parser = struct {
             _ = try self.expect(.semicolon);
             return ast.Statement{
                 .assign = .{ .name = name_tok.value, .value = value },
+            };
+        }
+
+        // Compound assignment: name += expr; name -= expr; etc.
+        if (self.check(.plus_eq) or self.check(.minus_eq) or
+            self.check(.star_eq) or self.check(.slash_eq) or self.check(.percent_eq))
+        {
+            const tok = self.advance();
+            const op: lexer.TokenType = switch (tok.typ) {
+                .plus_eq => .plus,
+                .minus_eq => .minus,
+                .star_eq => .star,
+                .slash_eq => .slash,
+                .percent_eq => .percent,
+                else => unreachable,
+            };
+            const value = try self.parseExpression();
+            _ = try self.expect(.semicolon);
+            const left = try self.allocator.create(ast.Expression);
+            left.* = .{ .identifier = name_tok.value };
+            const right = try self.allocator.create(ast.Expression);
+            right.* = value;
+            return ast.Statement{
+                .assign = .{
+                    .name = name_tok.value,
+                    .value = ast.Expression{ .binary_op = .{ .op = op, .left = left, .right = right } },
+                },
             };
         }
 
@@ -794,6 +851,48 @@ pub const Parser = struct {
         return ast.Statement{ .continue_stmt = {} };
     }
 
+    fn parseThrowStmt(self: *Parser) anyerror!ast.Statement {
+        _ = try self.expect(.keyword_throw);
+        const expr = try self.parseExpression();
+        _ = try self.expect(.semicolon);
+        return ast.Statement{ .throw_stmt = expr };
+    }
+
+    fn parseTryStmt(self: *Parser) anyerror!ast.Statement {
+        _ = try self.expect(.keyword_try);
+        const try_block = try self.parseBlock();
+        const try_ptr = try self.allocator.create(ast.Statement);
+        try_ptr.* = try_block;
+
+        // catch(string e) { ... }
+        _ = try self.expect(.keyword_catch);
+        _ = try self.expect(.l_paren);
+        _ = try self.expect(.keyword_string);
+        const catch_var_tok = try self.expect(.identifier);
+        _ = try self.expect(.r_paren);
+        const catch_block = try self.parseBlock();
+        const catch_ptr = try self.allocator.create(ast.Statement);
+        catch_ptr.* = catch_block;
+
+        // finally { ... } (optional)
+        var finally_ptr: ?*ast.Statement = null;
+        if (self.check(.keyword_finally)) {
+            _ = self.advance();
+            const finally_block = try self.parseBlock();
+            finally_ptr = try self.allocator.create(ast.Statement);
+            finally_ptr.?.* = finally_block;
+        }
+
+        return ast.Statement{
+            .try_stmt = .{
+                .try_block = try_ptr,
+                .catch_var = catch_var_tok.value,
+                .catch_block = catch_ptr,
+                .finally_block = finally_ptr,
+            },
+        };
+    }
+
     fn parseThisAssignOrExpr(self: *Parser) anyerror!ast.Statement {
         _ = try self.expect(.keyword_this);
         _ = try self.expect(.dot);
@@ -925,6 +1024,13 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) anyerror!ast.Program {
         var classes = std.ArrayList(ast.Class).init(self.allocator);
         while (!self.isAtEnd()) {
+            // Skip import statements — they're handled by main.zig before parsing
+            if (self.check(.keyword_import)) {
+                _ = self.advance(); // skip 'import'
+                if (self.check(.identifier)) _ = self.advance(); // skip module name
+                if (self.check(.semicolon)) _ = self.advance(); // skip ;
+                continue;
+            }
             try classes.append(try self.parseClass());
         }
         return ast.Program{

@@ -1,0 +1,73 @@
+public class Main {
+    public static void main() {
+        // Basic throw/catch
+        try {
+            throw "something went wrong";
+        } catch(string e) {
+            println("Caught: " + e);
+        }
+
+        // throw in a method, catch at call site
+        try {
+            riskyMethod(-1);
+            println("Should not reach here");
+        } catch(string err) {
+            println("Method error: " + err);
+        }
+
+        // No throw — catch block skipped
+        try {
+            riskyMethod(42);
+            println("No error thrown");
+        } catch(string err) {
+            println("Should not reach here");
+        }
+
+        // finally always runs
+        try {
+            println("In try block");
+        } catch(string e) {
+            println("Should not reach here");
+        } finally {
+            println("Finally runs even without error");
+        }
+
+        // finally runs even when error is caught
+        try {
+            throw "error with finally";
+        } catch(string e) {
+            println("Caught: " + e);
+        } finally {
+            println("Finally after catch");
+        }
+
+        // Throw from method, catch at call site
+        try {
+            int result = divide(10, 0);
+            println("Result: " + result);
+        } catch(string e) {
+            println("Division error: " + e);
+        }
+
+        try {
+            int result = divide(10, 2);
+            println("Result: " + result);
+        } catch(string e) {
+            println("Should not reach here");
+        }
+    }
+
+    static void riskyMethod(int x) {
+        if (x < 0) {
+            throw "x must be non-negative";
+        }
+        println("x is: " + x);
+    }
+
+    static int divide(int a, int b) {
+        if (b == 0) {
+            throw "division by zero";
+        }
+        return a / b;
+    }
+}

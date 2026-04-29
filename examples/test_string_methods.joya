@@ -1,0 +1,86 @@
+public class Main {
+    public static void main() {
+        // String methods
+        string s = "Hello World";
+
+        // substring
+        println(s.substring(6));          // World
+        println(s.substring(0, 5));       // Hello
+
+        // indexOf
+        println(s.indexOf("World"));      // 6
+        println(s.indexOf("xyz"));        // -1
+
+        // contains
+        println(s.contains("World"));     // true
+        println(s.contains("xyz"));       // false
+
+        // startsWith / endsWith
+        println(s.startsWith("Hello"));   // true
+        println(s.endsWith("World"));     // true
+        println(s.startsWith("World"));   // false
+
+        // toUpperCase / toLowerCase
+        println(s.toUpperCase());         // HELLO WORLD
+        println(s.toLowerCase());         // hello world
+
+        // trim
+        string padded = "  hello  ";
+        println(padded.trim());           // hello
+
+        // replace
+        println(s.replace("World", "Joya"));  // Hello Joya
+
+        // split
+        string csv = "a,b,c,d";
+        string[] parts = csv.split(",");
+        println(parts.length);            // 4
+        println(parts[0]);               // a
+        println(parts[3]);               // d
+
+        // Array methods
+        int[] arr = [5, 3, 1, 4, 2];
+        println(arr.length);             // 5
+
+        // push / pop
+        arr.push(6);
+        println(arr.length);             // 6
+        int popped = arr.pop();
+        println(popped);                 // 6
+        println(arr.length);             // 5
+
+        // contains / indexOf
+        println(arr.contains(3));        // true
+        println(arr.contains(99));       // false
+        println(arr.indexOf(4));         // 3
+        println(arr.indexOf(99));        // -1
+
+        // sort
+        arr.sort();
+        for (int x : arr) {
+            print(x);
+            print(" ");
+        }
+        println("");                     // 1 2 3 4 5
+
+        // reverse
+        arr.reverse();
+        for (int x : arr) {
+            print(x);
+            print(" ");
+        }
+        println("");                     // 5 4 3 2 1
+
+        // join
+        string[] names = ["Alice", "Bob", "Charlie"];
+        println(names.join(", "));       // Alice, Bob, Charlie
+
+        // removeAt
+        int[] nums = [10, 20, 30];
+        int removed = nums.removeAt(1);
+        println(removed);                // 20
+        println(nums.length);            // 2
+        println(nums[0]);               // 10
+        println(nums[1]);               // 30
+    }
+}

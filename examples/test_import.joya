@@ -1,0 +1,25 @@
+import Math;
+import Utils;
+
+public class Main {
+    public static void main() {
+        // Use imported Math class
+        println(Math.max(10, 20));     // 20
+        println(Math.min(10, 20));     // 10
+        println(Math.abs(-42));        // 42
+
+        // Use imported Utils class
+        Utils.log("Hello from Joya!");
+
+        string repeated = Utils.repeat("ab", 3);
+        println(repeated);             // ababab
+
+        // Combine imports with local logic
+        int[] nums = [3, 7, 2, 9, 1];
+        int maximum = nums[0];
+        for (int i = 1; i < nums.length; i++) {
+            maximum = Math.max(maximum, nums[i]);
+        }
+        println("Max: " + maximum);    // Max: 9
+    }
+}

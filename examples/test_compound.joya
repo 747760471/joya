@@ -1,0 +1,32 @@
+public class Main {
+    public static void main() {
+        // Compound assignment operators
+        int x = 10;
+        x += 5;
+        println(x);     // 15
+
+        x -= 3;
+        println(x);     // 12
+
+        x *= 2;
+        println(x);     // 24
+
+        x /= 4;
+        println(x);     // 6
+
+        x %= 4;
+        println(x);     // 2
+
+        // String concatenation with +=
+        string s = "Hello";
+        s += " World";
+        println(s);      // Hello World
+
+        // Float compound
+        float f = 10.0;
+        f += 0.5;
+        println(f);      // 10.5
+        f *= 2.0;
+        println(f);      // 21.0
+    }
+}

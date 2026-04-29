@@ -8,6 +8,10 @@ pub const Type = union(enum) {
     float,
     chan: *Type,
     array: *Type,
+    map: struct {
+        key: *Type,
+        value: *Type,
+    },
     class_ref: []const u8,
     void,
 };
@@ -52,6 +56,10 @@ pub const Expression = union(enum) {
     new_object: struct {
         class_name: []const u8,
         args: []const Expression,
+    },
+    new_map: struct {
+        key_type: Type,
+        value_type: Type,
     },
     method_call: struct {
         object: *Expression,
@@ -101,6 +109,13 @@ pub const Statement = union(enum) {
     },
     break_stmt,
     continue_stmt,
+    throw_stmt: Expression,
+    try_stmt: struct {
+        try_block: *Statement,
+        catch_var: []const u8,
+        catch_block: *Statement,
+        finally_block: ?*Statement,
+    },
     if_stmt: struct {
         cond: Expression,
         then_branch: *Statement,
