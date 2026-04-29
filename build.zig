@@ -11,6 +11,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Conditionally include C source for ucontext backend (Linux/macOS)
+    const tag = target.result.os.tag;
+    if (tag == .linux or tag == .macos) {
+        exe.addCSourceFile(.{
+            .file = b.path("src/fiber_ucontext.c"),
+            .flags = &.{"-D_XOPEN_SOURCE"},
+        });
+        exe.linkLibC();
+    }
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

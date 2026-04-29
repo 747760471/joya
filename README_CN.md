@@ -16,6 +16,7 @@ Joya 是一门系统级编程语言，旨在融合 Java 熟悉的面向对象语
 | 并发 | 线程、锁、CompletableFuture | goroutine + channel | **go {} + chan\<T\>** |
 | 性能 | JVM 开销 | 原生，快 | **原生执行（LLVM，计划中）** |
 | 调度器 | OS 线程（每个 ~1MB 栈） | M:N 协程 | **M:N 协程（Fiber 实现）** |
+| 跨平台 | JVM（跨平台） | 原生（跨平台） | **Windows / Linux / macOS** |
 | 学习成本 | — | 新范式 | **Java 开发者零成本** |
 
 Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新的语法。Joya 让你在最熟悉的结构里，用 Go 风格的并发模型写出高效并发程序。
@@ -25,6 +26,7 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 - **熟悉** — 类、方法、大括号、分号。会 Java 就会 Joya。
 - **天生并发** — `go {}` 启动协程，`chan<T>` 连接协程。无需手动管锁和线程池。
 - **轻量调度** — M:N 用户态协程调度器。数万协程运行在少数 OS 线程上。
+- **跨平台** — 运行于 Windows、Linux、macOS。调度器自动适配各平台。
 - **高性能** — 通过 LLVM 编译为独立原生可执行文件（计划中）。无运行时，无虚拟机。
 - **安全** — 垃圾回收保证内存安全。无悬垂指针，无数据竞争。
 - **简洁** — 最少样板代码。`public static void main()` 即可开始。
@@ -61,16 +63,29 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 
 ### 阶段二：用户态协程调度器 — 已完成
 
-基于 Windows Fiber 的 M:N 协程调度器，实现轻量级并发。
+M:N 协程调度器，支持跨平台 Fiber 上下文切换。
 
 | 功能 | 状态 |
 |------|------|
 | **M:N 调度模型** — N 个协程运行在 M 个 OS 线程上（M = CPU 核心数） | ✅ |
-| **Windows Fiber 上下文切换** — 纳秒级切换 | ✅ |
+| **跨平台上下文切换** — Windows Fiber / Linux & macOS 内联汇编 | ✅ |
 | **全局运行队列** — 锁保护，工作线程竞争获取协程 | ✅ |
 | **`go {}` 创建轻量级协程** — 不再为每个 go 创建 OS 线程 | ✅ |
 | **Chan 集成** — `send`/`receive` 阻塞 → 让出 CPU；数据就绪 → 重新入队 | ✅ |
 | **压力测试** — 1000+ 并发协程 + 通道通信，零泄漏 | ✅ |
+
+#### 平台支持
+
+| 平台 | 后端 | 上下文切换机制 |
+|------|------|--------------|
+| **Windows** | `fiber_windows.zig` | Win32 Fiber API（`CreateFiber` / `SwitchToFiber`） |
+| **Linux (x86_64)** | `fiber_ucontext.zig` + C shim | 内联汇编（System V ABI callee-saved 寄存器） |
+| **Linux (aarch64)** | `fiber_ucontext.zig` + C shim | 内联汇编（AAPCS64 callee-saved 寄存器） |
+| **macOS (x86_64)** | `fiber_ucontext.zig` + C shim | 内联汇编（System V ABI + macOS 符号前缀） |
+| **macOS (aarch64)** | `fiber_ucontext.zig` + C shim | 内联汇编（AAPCS64 callee-saved 寄存器） |
+| **其他** | `fiber_fallback.zig` | 占位 → 自动回退到 OS 线程模式 |
+
+跨平台抽象通过 `fiber.zig` 实现，使用 `@import("builtin").os.tag` 在 **comptime** 选择后端。调度器代码（`scheduler.zig`）完全平台无关 — 无 `#ifdef` 或平台特定代码。
 
 #### 调度器 vs OS 线程
 
@@ -80,6 +95,7 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 | 上下文切换 | ~1μs（内核） | ~100ns（用户态） |
 | 最大并发 | ~1,000 | ~100,000+ |
 | Chan 阻塞 | condvar（内核等待） | yield（用户态让出） |
+| 跨平台 | 全平台（OS 提供） | Windows / Linux / macOS |
 
 ### 路线图
 
@@ -87,6 +103,7 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 |------|------|------|
 | **1** | 解释器原型 — 验证语法与并发语义 | ✅ 已完成 |
 | **2** | 用户态协程调度器（M:N，Fiber 实现） | ✅ 已完成 |
+| **2.5** | 跨平台 Fiber 抽象层（Windows/Linux/macOS） | ✅ 已完成 |
 | **3** | LLVM 后端 — 编译为原生可执行文件 | 🔜 下一阶段 |
 | **4** | 自举 — 用 Joya 重写编译器 | 📋 计划中 |
 
@@ -261,9 +278,29 @@ public class Main {
 
 ## 🛠️ 构建与运行
 
+### Windows
+
 ```bash
 zig build
 zig-out\bin\joya.exe examples\hello.joya
+```
+
+### Linux / macOS
+
+```bash
+zig build
+./zig-out/bin/joya examples/hello.joya
+```
+
+### 交叉编译
+
+Zig 开箱即支持交叉编译，所有目标编译通过：
+
+```bash
+zig build -Dtarget=x86_64-linux     # Linux x86_64
+zig build -Dtarget=aarch64-linux    # Linux ARM64
+zig build -Dtarget=x86_64-macos     # macOS Intel
+zig build -Dtarget=aarch64-macos    # macOS Apple Silicon
 ```
 
 **依赖：** Zig 0.12.0 LTS（0.13+ 开发版 API 不兼容）
@@ -272,7 +309,7 @@ zig-out\bin\joya.exe examples\hello.joya
 
 ```
 joya/
-├── build.zig              # Zig 构建配置
+├── build.zig              # Zig 构建配置（条件编译 C 文件）
 ├── README.md              # 英文说明
 ├── README_CN.md           # 中文说明
 ├── joya.md                # 语言规范文档
@@ -282,7 +319,12 @@ joya/
 │   ├── lexer.zig          # 词法分析器（28+ 关键字）
 │   ├── ast.zig            # AST 结构定义
 │   ├── parser.zig         # 递归下降解析器（优先级爬升法）
-│   ├── scheduler.zig      # M:N 协程调度器（Windows Fiber）
+│   ├── fiber.zig          # 跨平台 Fiber 抽象层（comptime 选择后端）
+│   ├── fiber_windows.zig  # Windows Fiber 后端（Win32 API）
+│   ├── fiber_ucontext.zig # Linux/macOS Fiber 后端（汇编上下文切换）
+│   ├── fiber_ucontext.c   # 汇编上下文切换 C shim（x86_64 / aarch64）
+│   ├── fiber_fallback.zig # 兜底后端（占位，自动回退 OS 线程）
+│   ├── scheduler.zig      # M:N 协程调度器（平台无关）
 │   └── interpreter.zig    # 解释器核心（对象、数组、通道、调度器集成）
 └── examples/
     ├── hello.joya         # 协程与通道示例
@@ -295,6 +337,7 @@ joya/
     ├── test_null.joya     # null 值测试
     ├── test_break.joya    # break/continue 测试
     ├── test_class.joya    # 对象与多类测试
+    ├── test_class_min.joya # 最小 this.field 测试
     └── test_if.joya       # if/else 测试
 ```
 

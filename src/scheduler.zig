@@ -1,10 +1,16 @@
-//! Joya M:N Goroutine Scheduler
+//! Joya M:N Goroutine Scheduler (Cross-platform)
 //!
 //! Architecture:
 //! - M OS worker threads (M = CPU count)
-//! - N user-space goroutines (Fibers on Windows)
+//! - N user-space goroutines (Fibers)
 //! - Global run queue + per-worker local queue
 //! - Channel blocking yields the current goroutine, unblocking re-enqueues it
+//!
+//! Platform support:
+//!   Windows → Win32 Fiber API
+//!   Linux   → ucontext_t
+//!   macOS   → ucontext_t
+//!   Other   → fallback (error at scheduler init, OS thread mode used instead)
 //!
 //! Flow:
 //!   go {} → create Fiber → enqueue to global queue
@@ -13,24 +19,11 @@
 //!   Chan signal → enqueue waiting goroutine
 
 const std = @import("std");
-const windows = std.os.windows;
-const WINAPI = windows.WINAPI;
-const LPVOID = windows.LPVOID;
-const SIZE_T = windows.SIZE_T;
-
-const PFIBER_START_ROUTINE = *const fn (?LPVOID) callconv(WINAPI) void;
-
-// Windows Fiber API
-extern "kernel32" fn CreateFiber(SIZE_T, PFIBER_START_ROUTINE, ?LPVOID) callconv(WINAPI) ?LPVOID;
-extern "kernel32" fn SwitchToFiber(LPVOID) callconv(WINAPI) void;
-extern "kernel32" fn DeleteFiber(LPVOID) callconv(WINAPI) void;
-extern "kernel32" fn ConvertThreadToFiber(?LPVOID) callconv(WINAPI) ?LPVOID;
-extern "kernel32" fn ConvertFiberToThread() callconv(WINAPI) i32;
+const fiber = @import("fiber.zig");
 
 /// A single goroutine (user-space coroutine)
 pub const Goroutine = struct {
-    fiber: LPVOID,              // Windows Fiber handle
-    scheduler_fiber: LPVOID,    // scheduler fiber to yield back to
+    fiber_handle: fiber.FiberHandle,  // cross-platform fiber handle
     state: State,
     id: u64,
 
@@ -69,7 +62,7 @@ pub const Scheduler = struct {
     pub fn deinit(self: *Scheduler) void {
         for (self.all_goroutines.items) |g| {
             if (g.state != .done) {
-                DeleteFiber(g.fiber);
+                fiber.deleteFiber(g.fiber_handle);
             }
             self.allocator.destroy(g);
         }
@@ -83,8 +76,7 @@ pub const Scheduler = struct {
     pub fn spawn(self: *Scheduler, comptime func: *const fn (*Goroutine, ?*anyopaque) void, user_data: ?*anyopaque) !*Goroutine {
         const g = try self.allocator.create(Goroutine);
         g.* = .{
-            .fiber = undefined,
-            .scheduler_fiber = undefined,
+            .fiber_handle = undefined,
             .state = .runnable,
             .id = blk: {
                 self.mutex.lock();
@@ -97,9 +89,12 @@ pub const Scheduler = struct {
         // Create the fiber with a wrapper entry point
         const ctx = try self.allocator.create(GoroutineLaunchCtx);
         ctx.* = .{ .sched = self, .goroutine = g, .func = func, .user_data = user_data };
-        const fiber = CreateFiber(0, goroutineEntry, @ptrCast(@alignCast(ctx)));
-        if (fiber == null) return error.FiberCreationFailed;
-        g.fiber = fiber.?;
+        const fiber_handle = fiber.createFiber(0, goroutineEntry, @ptrCast(@alignCast(ctx))) catch {
+            self.allocator.destroy(ctx);
+            self.allocator.destroy(g);
+            return error.FiberCreationFailed;
+        };
+        g.fiber_handle = fiber_handle;
 
         // Track and enqueue
         self.mutex.lock();
@@ -140,7 +135,7 @@ pub const Scheduler = struct {
     pub fn blockCurrent(_: *Scheduler, g: *Goroutine) void {
         g.state = .blocked;
         // Yield back to scheduler
-        SwitchToFiber(g.scheduler_fiber);
+        fiber.switchToFiber(fiber.getMasterFiber());
     }
 
     /// Unblock a goroutine (used by chan when data available)
@@ -157,8 +152,8 @@ const GoroutineLaunchCtx = struct {
     user_data: ?*anyopaque,
 };
 
-/// Windows Fiber entry point wrapper
-fn goroutineEntry(param: ?LPVOID) callconv(WINAPI) void {
+/// Cross-platform fiber entry point wrapper
+fn goroutineEntry(param: ?*anyopaque) callconv(.C) void {
     const ctx: *GoroutineLaunchCtx = @ptrCast(@alignCast(param.?));
     const sched = ctx.sched;
     const g = ctx.goroutine;
@@ -171,7 +166,7 @@ fn goroutineEntry(param: ?LPVOID) callconv(WINAPI) void {
 
     g.state = .done;
     // Yield back to scheduler — goroutine is finished
-    SwitchToFiber(g.scheduler_fiber);
+    fiber.switchToFiber(fiber.getMasterFiber());
 }
 
 /// Per-worker thread state
@@ -179,13 +174,10 @@ const WorkerThread = struct {
     sched: *Scheduler,
     thread: std.Thread,
     id: usize,
-    scheduler_fiber: LPVOID,
-    current_goroutine: ?*Goroutine,
 };
 
-/// Thread-local: current goroutine and scheduler fiber for the running worker
+/// Thread-local: current goroutine and scheduler for the running worker
 pub threadlocal var tls_current_goroutine: ?*Goroutine = null;
-pub threadlocal var tls_scheduler_fiber: ?LPVOID = null;
 pub threadlocal var tls_scheduler: ?*Scheduler = null;
 
 /// Start the scheduler: launch worker threads and wait for completion
@@ -198,8 +190,6 @@ pub fn run(sched: *Scheduler) !void {
             .sched = sched,
             .thread = undefined,
             .id = i,
-            .scheduler_fiber = undefined,
-            .current_goroutine = null,
         };
         worker.thread = try std.Thread.spawn(.{}, workerMain, .{worker});
     }
@@ -214,12 +204,11 @@ fn workerMain(worker: *WorkerThread) void {
     const sched = worker.sched;
 
     // Convert this OS thread to a fiber (required for fiber scheduling)
-    const scheduler_fiber = ConvertThreadToFiber(null) orelse {
-        std.debug.print("Worker {}: ConvertThreadToFiber failed\n", .{worker.id});
+    const master_fiber = fiber.convertThreadToFiber() catch {
+        std.debug.print("Worker {}: convertThreadToFiber failed\n", .{worker.id});
         return;
     };
-    worker.scheduler_fiber = scheduler_fiber;
-    tls_scheduler_fiber = scheduler_fiber;
+    _ = master_fiber;
     tls_scheduler = sched;
 
     // Worker loop: dequeue goroutines and execute them
@@ -232,20 +221,17 @@ fn workerMain(worker: *WorkerThread) void {
 
         // Set up TLS for this worker
         tls_current_goroutine = g;
-        g.scheduler_fiber = scheduler_fiber;
-        worker.current_goroutine = g;
         g.state = .running;
 
         // Switch to the goroutine fiber
-        SwitchToFiber(g.fiber);
+        fiber.switchToFiber(g.fiber_handle);
 
         // Goroutine yielded back to us (blocked or done)
         tls_current_goroutine = null;
-        worker.current_goroutine = null;
     }
 
     // Convert back to normal thread
-    _ = ConvertFiberToThread();
+    fiber.convertFiberToThread();
 }
 
 /// Yield the current goroutine (e.g., when chan is blocked)

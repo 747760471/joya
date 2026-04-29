@@ -16,6 +16,7 @@ Joya is a systems programming language that bridges the gap between Java's famil
 | Concurrency | Threads, locks, CompletableFuture | goroutines + channels | **go {} + chan\<T\>** |
 | Performance | JVM overhead | Native, fast | **Native (LLVM, planned)** |
 | Scheduler | OS threads (~1MB stack each) | M:N goroutines | **M:N goroutines (Fiber-based)** |
+| Platforms | JVM (cross-platform) | Native (cross-platform) | **Windows / Linux / macOS** |
 | Learning curve | — | New paradigm | **Zero for Java devs** |
 
 Java developers shouldn't have to learn a completely new syntax just to get goroutines and channels. Joya gives you the best of both worlds — the structure you're productive in, with the concurrency model Go popularized.
@@ -25,6 +26,7 @@ Java developers shouldn't have to learn a completely new syntax just to get goro
 - **Familiar** — Classes, methods, braces, semicolons. If you know Java, you know Joya.
 - **Concurrent by default** — `go {}` spawns a goroutine. `chan<T>` connects them. No locks, no thread pools.
 - **Lightweight scheduling** — M:N user-space goroutine scheduler. Thousands of goroutines on a handful of OS threads.
+- **Cross-platform** — Runs on Windows, Linux, and macOS. The scheduler adapts to each platform automatically.
 - **Fast** — Compiles to standalone native executables via LLVM (planned). No runtime, no VM.
 - **Safe** — Memory-safe with garbage collection. No use-after-free, no data races.
 - **Simple** — Minimal boilerplate. `public static void main()` is all you need to start.
@@ -61,16 +63,29 @@ A fully working tree-walking interpreter with arrays, objects, method calls, and
 
 ### Phase 2: User-Space Goroutine Scheduler — Complete
 
-M:N goroutine scheduler using Windows Fibers for lightweight concurrency.
+M:N goroutine scheduler with cross-platform fiber context switching.
 
 | Feature | Status |
 |---------|--------|
 | **M:N scheduling model** — N goroutines on M OS threads (M = CPU count) | ✅ |
-| **Windows Fiber context switching** — nanosecond-level switches | ✅ |
+| **Cross-platform context switching** — Windows Fiber / Linux & macOS asm | ✅ |
 | **Global run queue** — lock-protected, worker threads compete for goroutines | ✅ |
 | **`go {}` spawns lightweight goroutine** — no OS thread per goroutine | ✅ |
 | **Chan integration** — `send`/`receive` block → yield CPU; data ready → re-enqueue | ✅ |
 | **Stress tested** — 1000+ concurrent goroutines with channels, zero leaks | ✅ |
+
+#### Platform Support
+
+| Platform | Backend | Context Switch Mechanism |
+|----------|---------|------------------------|
+| **Windows** | `fiber_windows.zig` | Win32 Fiber API (`CreateFiber` / `SwitchToFiber`) |
+| **Linux (x86_64)** | `fiber_ucontext.zig` + C shim | Inline assembly (System V ABI callee-saved regs) |
+| **Linux (aarch64)** | `fiber_ucontext.zig` + C shim | Inline assembly (AAPCS64 callee-saved regs) |
+| **macOS (x86_64)** | `fiber_ucontext.zig` + C shim | Inline assembly (System V ABI + macOS symbol prefix) |
+| **macOS (aarch64)** | `fiber_ucontext.zig` + C shim | Inline assembly (AAPCS64 callee-saved regs) |
+| **Other** | `fiber_fallback.zig` | Stub → auto-fallback to OS thread mode |
+
+The cross-platform abstraction is achieved via `fiber.zig`, which selects the backend at **comptime** using `@import("builtin").os.tag`. The scheduler code (`scheduler.zig`) is fully platform-agnostic — no `#ifdef` or platform-specific code.
 
 #### Scheduler vs OS Threads
 
@@ -80,6 +95,7 @@ M:N goroutine scheduler using Windows Fibers for lightweight concurrency.
 | Context switch | ~1μs (kernel) | ~100ns (user-space) |
 | Max concurrency | ~1,000 | ~100,000+ |
 | Chan blocking | condvar (kernel wait) | yield (user-space) |
+| Platform support | All (OS-provided) | Windows / Linux / macOS |
 
 ### Roadmap
 
@@ -87,6 +103,7 @@ M:N goroutine scheduler using Windows Fibers for lightweight concurrency.
 |-------|------|--------|
 | **1** | Interpreter prototype — validate syntax & semantics | ✅ Complete |
 | **2** | User-space goroutine scheduler (M:N, Fiber-based) | ✅ Complete |
+| **2.5** | Cross-platform Fiber abstraction (Windows/Linux/macOS) | ✅ Complete |
 | **3** | LLVM backend — compile to native executables | 🔜 Next |
 | **4** | Self-hosting — rewrite compiler in Joya | 📋 Planned |
 
@@ -261,9 +278,29 @@ public class Main {
 
 ## 🛠️ Build & Run
 
+### Windows
+
 ```bash
 zig build
 zig-out\bin\joya.exe examples\hello.joya
+```
+
+### Linux / macOS
+
+```bash
+zig build
+./zig-out/bin/joya examples/hello.joya
+```
+
+### Cross-Compilation
+
+Zig supports cross-compilation out of the box. All targets compile successfully:
+
+```bash
+zig build -Dtarget=x86_64-linux     # Linux x86_64
+zig build -Dtarget=aarch64-linux    # Linux ARM64
+zig build -Dtarget=x86_64-macos     # macOS Intel
+zig build -Dtarget=aarch64-macos    # macOS Apple Silicon
 ```
 
 **Requirements:** Zig 0.12.0 LTS (0.13+ dev builds have incompatible API)
@@ -272,7 +309,7 @@ zig-out\bin\joya.exe examples\hello.joya
 
 ```
 joya/
-├── build.zig              # Zig build config
+├── build.zig              # Zig build config (conditional C compilation)
 ├── README.md              # English readme
 ├── README_CN.md           # Chinese readme
 ├── joya.md                # Language specification
@@ -282,7 +319,12 @@ joya/
 │   ├── lexer.zig          # Lexer (28+ keywords)
 │   ├── ast.zig            # AST definitions
 │   ├── parser.zig         # Recursive descent parser (precedence climbing)
-│   ├── scheduler.zig      # M:N goroutine scheduler (Windows Fiber)
+│   ├── fiber.zig          # Cross-platform Fiber abstraction (comptime backend selection)
+│   ├── fiber_windows.zig  # Windows Fiber backend (Win32 API)
+│   ├── fiber_ucontext.zig # Linux/macOS Fiber backend (asm context switching)
+│   ├── fiber_ucontext.c   # C shim for asm context switching (x86_64 / aarch64)
+│   ├── fiber_fallback.zig # Fallback backend (stub, auto-fallback to OS threads)
+│   ├── scheduler.zig      # M:N goroutine scheduler (platform-agnostic)
 │   └── interpreter.zig    # Interpreter (objects, arrays, channels, scheduler integration)
 └── examples/
     ├── hello.joya         # Goroutines & channels
@@ -295,6 +337,7 @@ joya/
     ├── test_null.joya     # Null value tests
     ├── test_break.joya    # break/continue tests
     ├── test_class.joya    # Object & multi-class tests
+    ├── test_class_min.joya # Minimal this.field test
     └── test_if.joya       # if/else test
 ```
 
