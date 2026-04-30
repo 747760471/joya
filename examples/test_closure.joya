@@ -1,0 +1,50 @@
+class Main {
+    void main() {
+        // Test 1: Basic lambda assignment and invocation
+        fn adder = fn(int x, int y) { return x + y; };
+        println(adder(3, 4));
+
+        // Test 2: Lambda as method parameter (higher-order function)
+        int result = apply(fn(int x) { return x * x; }, 5);
+        println(result);
+
+        // Test 3: Closure capturing outer variable
+        int factor = 10;
+        fn scaler = fn(int x) { return x * factor; };
+        println(scaler(5));
+
+        // Test 4: Closure returned from method
+        fn doubler = makeMultiplier(2);
+        fn tripler = makeMultiplier(3);
+        println(doubler(7));
+        println(tripler(7));
+
+        // Test 5: Array map with closure
+        int[] nums = [1, 2, 3, 4, 5];
+        int[] squared = nums.map(fn(int x) { return x * x; });
+        println(squared);
+
+        // Test 6: Array filter with closure
+        int[] evens = nums.filter(fn(int x) { return x % 2 == 0; });
+        println(evens);
+
+        // Test 7: Array forEach with closure
+        nums.forEach(fn(int x) { println(x); });
+
+        // Test 8: Array reduce with closure
+        int sum = nums.reduce(fn(int acc, int x) { return acc + x; }, 0);
+        println(sum);
+
+        // Test 9: IIFE (Immediately Invoked Function Expression)
+        int val = fn(int x) { return x + 100; }(42);
+        println(val);
+    }
+
+    int apply(fn func, int value) {
+        return func(value);
+    }
+
+    fn makeMultiplier(int n) {
+        return fn(int x) { return x * n; };
+    }
+}

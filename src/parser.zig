@@ -49,10 +49,12 @@ pub const Parser = struct {
         return self.peek().typ == .eof;
     }
 
-    /// Parse a name: identifier or keyword_main (since 'main' is a keyword but valid as a name)
+    /// Parse a name: identifier or keyword that can be used as a name (main, map, etc.)
     fn parseName(self: *Parser) !lexer.Token {
         if (self.check(.identifier)) return self.advance();
         if (self.check(.keyword_main)) return self.advance();
+        if (self.check(.keyword_map)) return self.advance();
+        if (self.check(.keyword_fn)) return self.advance();
         const tok = self.peek();
         std.debug.print("Parse error: expected name, got {} ('{s}') at line {}\n", .{ tok.typ, tok.value, tok.line });
         return error.ExpectedName;
@@ -67,7 +69,8 @@ pub const Parser = struct {
             self.check(.keyword_float) or
             self.check(.keyword_void) or
             self.check(.keyword_chan) or
-            self.check(.keyword_map);
+            self.check(.keyword_map) or
+            self.check(.keyword_fn);
     }
 
     /// Parse a base type without [] suffix (used by new T[size] and type declarations)
@@ -98,6 +101,11 @@ pub const Parser = struct {
             const val_ptr = try self.allocator.create(ast.Type);
             val_ptr.* = value_type;
             return ast.Type{ .map = .{ .key = key_ptr, .value = val_ptr } };
+        }
+        // fn type (used as variable/parameter type for closures)
+        if (self.check(.keyword_fn)) {
+            _ = self.advance();
+            return ast.Type{ .fn_ref = {} };
         }
         // Class type: identifier used as type name
         if (self.check(.identifier)) {
@@ -267,6 +275,36 @@ pub const Parser = struct {
             return expr;
         }
 
+        // Lambda expression: fn(Type name, ...) { body }
+        if (self.check(.keyword_fn)) {
+            // Lookahead: fn followed by ( means lambda expression
+            if (self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].typ == .l_paren) {
+                _ = self.advance(); // consume 'fn'
+                _ = try self.expect(.l_paren);
+                var params = std.ArrayList(ast.Param).init(self.allocator);
+                if (!self.check(.r_paren)) {
+                    const param_type = try self.parseType();
+                    const param_name = try self.parseName();
+                    try params.append(.{ .typ = param_type, .name = param_name.value });
+                    while (self.check(.comma)) {
+                        _ = self.advance();
+                        const pt = try self.parseType();
+                        const pn = try self.parseName();
+                        try params.append(.{ .typ = pt, .name = pn.value });
+                    }
+                }
+                _ = try self.expect(.r_paren);
+                const body = try self.parseBlock();
+                const body_ptr = try self.allocator.create(ast.Statement);
+                body_ptr.* = body;
+                var expr = ast.Expression{
+                    .lambda = .{ .params = try params.toOwnedSlice(), .body = body_ptr },
+                };
+                expr = try self.parsePostfix(expr);
+                return expr;
+            }
+        }
+
         // new chan<T>(capacity)
         if (self.check(.keyword_new)) {
             _ = self.advance();
@@ -423,8 +461,26 @@ pub const Parser = struct {
     fn parsePostfix(self: *Parser, expr: ast.Expression) anyerror!ast.Expression {
         var result = expr;
         while (true) {
+            // Direct invocation: expr(args) — used for IIFE or calling a closure returned by expression
+            if (self.check(.l_paren)) {
+                _ = self.advance();
+                var args = std.ArrayList(ast.Expression).init(self.allocator);
+                if (!self.check(.r_paren)) {
+                    try args.append(try self.parseExpression());
+                    while (self.check(.comma)) {
+                        _ = self.advance();
+                        try args.append(try self.parseExpression());
+                    }
+                }
+                _ = try self.expect(.r_paren);
+                const obj = try self.allocator.create(ast.Expression);
+                obj.* = result;
+                result = ast.Expression{
+                    .method_call = .{ .object = obj, .method = "", .args = try args.toOwnedSlice() },
+                };
+            }
             // Array index: expr[index]
-            if (self.check(.l_bracket)) {
+            else if (self.check(.l_bracket)) {
                 _ = self.advance();
                 const index = try self.parseExpression();
                 _ = try self.expect(.r_bracket);
@@ -485,6 +541,12 @@ pub const Parser = struct {
         if (self.check(.keyword_try)) return self.parseTryStmt();
         if (self.check(.keyword_print) or self.check(.keyword_println)) return self.parsePrintStmt();
         if (self.check(.keyword_this)) return self.parseThisAssignOrExpr();
+        // Lambda expression as statement: fn(params) { body }(args);
+        if (self.check(.keyword_fn) and self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].typ == .l_paren) {
+            const expr = try self.parseExpression();
+            _ = try self.expect(.semicolon);
+            return ast.Statement{ .expr_stmt = expr };
+        }
         if (self.isTypeStart()) return self.parseVarDecl();
         // Class-typed variable declaration: ClassName name = ...;
         // Lookahead: identifier followed by another identifier

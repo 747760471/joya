@@ -12,6 +12,7 @@ pub const Value = union(enum) {
     array: *JoyaArray,
     map: *JoyaMap,
     object: *JoyaObject,
+    closure: *Closure,
     null_val,
     void,
 };
@@ -33,6 +34,30 @@ pub const JoyaObject = struct {
 
     pub fn deinit(self: *JoyaObject) void {
         self.fields.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
+/// Runtime closure: captures an environment snapshot + AST params/body
+pub const Closure = struct {
+    params: []const ast.Param,
+    body: *ast.Statement,
+    captured_env: Environment,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, params: []const ast.Param, body: *ast.Statement, captured_env: Environment) !*Closure {
+        const cl = try allocator.create(Closure);
+        cl.* = .{
+            .params = params,
+            .body = body,
+            .captured_env = captured_env,
+            .allocator = allocator,
+        };
+        return cl;
+    }
+
+    pub fn deinit(self: *Closure) void {
+        self.captured_env.deinit();
         self.allocator.destroy(self);
     }
 };
@@ -72,6 +97,7 @@ pub const JoyaArray = struct {
             .float => Value{ .float = 0.0 },
             .string => Value{ .string = "" },
             .bool => Value{ .bool = false },
+            .fn_ref => Value{ .null_val = {} },
             else => Value.void,
         };
     }
@@ -314,6 +340,7 @@ const RuntimeCtx = struct {
     arrays: std.ArrayList(*JoyaArray),
     maps: std.ArrayList(*JoyaMap),
     objects: std.ArrayList(*JoyaObject),
+    closures: std.ArrayList(*Closure),
     heap_strings: std.ArrayList([]const u8),
     program: ?*const ast.Program,
     return_value: ?Value,
@@ -327,6 +354,7 @@ const RuntimeCtx = struct {
             .arrays = std.ArrayList(*JoyaArray).init(allocator),
             .maps = std.ArrayList(*JoyaMap).init(allocator),
             .objects = std.ArrayList(*JoyaObject).init(allocator),
+            .closures = std.ArrayList(*Closure).init(allocator),
             .heap_strings = std.ArrayList([]const u8).init(allocator),
             .program = null,
             .return_value = null,
@@ -343,6 +371,8 @@ const RuntimeCtx = struct {
         self.maps.deinit();
         for (self.objects.items) |obj| obj.deinit();
         self.objects.deinit();
+        for (self.closures.items) |cl| cl.deinit();
+        self.closures.deinit();
         for (self.heap_strings.items) |s| self.allocator.free(s);
         self.heap_strings.deinit();
     }
@@ -369,6 +399,12 @@ const RuntimeCtx = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.objects.append(obj);
+    }
+
+    pub fn trackClosure(self: *RuntimeCtx, cl: *Closure) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.closures.append(cl);
     }
 
     pub fn trackString(self: *RuntimeCtx, s: []const u8) !void {
@@ -609,6 +645,25 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
             return error.UndefinedClass;
         },
         .method_call => |mc| {
+            // Direct invocation: expr(args) — method name is empty (from parsePostfix)
+            if (mc.method.len == 0) {
+                const obj_val = try eval_expression(env, ctx, mc.object.*);
+                if (obj_val == .closure) {
+                    return evalClosureCall(env, ctx, obj_val.closure, mc.args);
+                }
+                return error.NotCallable;
+            }
+
+            // Closure variable: if object is an identifier and resolves to a closure
+            // Takes priority over static method dispatch
+            if (mc.object.* == .identifier) {
+                if (env.get(mc.object.*.identifier)) |var_val| {
+                    if (var_val == .closure) {
+                        return evalClosureCall(env, ctx, var_val.closure, mc.args);
+                    }
+                }
+            }
+
             // Check for static method call: ClassName.method(args)
             // If the object is an identifier that matches a class name, call statically
             if (mc.object.* == .identifier) {
@@ -685,6 +740,13 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
             if (val == .bool) return Value{ .bool = !val.bool };
             return error.InvalidOperation;
         },
+        .lambda => |lam| {
+            // Capture current environment by cloning
+            const captured = try env.clone();
+            const cl = try Closure.init(env.allocator, lam.params, lam.body, captured);
+            try ctx.trackClosure(cl);
+            return Value{ .closure = cl };
+        },
         .field_access => |fa| {
             // .length on arrays and strings
             if (std.mem.eql(u8, fa.field, "length")) {
@@ -730,6 +792,12 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
                 const val = try eval_expression(env, ctx, c.args[0]);
                 try printValue(val, true);
                 return .void;
+            }
+            // Check if the name refers to a closure variable in the current environment
+            if (env.get(c.name)) |var_val| {
+                if (var_val == .closure) {
+                    return evalClosureCall(env, ctx, var_val.closure, c.args);
+                }
             }
             // User-defined method call
             if (ctx.program) |prog| {
@@ -1081,6 +1149,60 @@ fn evalArrayMethod(env: *Environment, ctx: *RuntimeCtx, arr: *JoyaArray, method:
         return Value.void;
     }
 
+    if (std.mem.eql(u8, method, "map")) {
+        // arr.map(fn) → new array with fn applied to each element
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const func_val = try eval_expression(env, ctx, args[0]);
+        if (func_val != .closure) return error.ExpectedClosure;
+        const result_arr = try JoyaArray.init(env.allocator, arr.elem_type, 0, .void);
+        try ctx.trackArray(result_arr);
+        for (arr.items.items) |item| {
+            const mapped = try callClosureWithArgs(env, ctx, func_val.closure, &[_]Value{item});
+            try result_arr.items.append(mapped);
+        }
+        return Value{ .array = result_arr };
+    }
+
+    if (std.mem.eql(u8, method, "filter")) {
+        // arr.filter(fn) → new array with elements where fn returns true
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const func_val = try eval_expression(env, ctx, args[0]);
+        if (func_val != .closure) return error.ExpectedClosure;
+        const result_arr = try JoyaArray.init(env.allocator, arr.elem_type, 0, .void);
+        try ctx.trackArray(result_arr);
+        for (arr.items.items) |item| {
+            const result = try callClosureWithArgs(env, ctx, func_val.closure, &[_]Value{item});
+            if (result == .bool and result.bool) {
+                try result_arr.items.append(item);
+            }
+        }
+        return Value{ .array = result_arr };
+    }
+
+    if (std.mem.eql(u8, method, "forEach")) {
+        // arr.forEach(fn) — call fn for each element (returns void)
+        if (args.len < 1) return error.WrongNumberOfArguments;
+        const func_val = try eval_expression(env, ctx, args[0]);
+        if (func_val != .closure) return error.ExpectedClosure;
+        for (arr.items.items) |item| {
+            _ = try callClosureWithArgs(env, ctx, func_val.closure, &[_]Value{item});
+        }
+        return Value.void;
+    }
+
+    if (std.mem.eql(u8, method, "reduce")) {
+        // arr.reduce(fn, initial) → accumulated value
+        // fn takes (accumulator, currentElement)
+        if (args.len < 2) return error.WrongNumberOfArguments;
+        const func_val = try eval_expression(env, ctx, args[0]);
+        if (func_val != .closure) return error.ExpectedClosure;
+        var accumulator = try eval_expression(env, ctx, args[1]);
+        for (arr.items.items) |item| {
+            accumulator = try callClosureWithArgs(env, ctx, func_val.closure, &[_]Value{ accumulator, item });
+        }
+        return accumulator;
+    }
+
     return error.UndefinedArrayMethod;
 }
 
@@ -1165,6 +1287,40 @@ fn evalMapMethod(env: *Environment, ctx: *RuntimeCtx, m: *JoyaMap, method: []con
     }
 
     return error.UndefinedMapMethod;
+}
+
+/// Evaluate a closure call: bind args to params, execute body in captured environment
+fn evalClosureCall(env: *Environment, ctx: *RuntimeCtx, cl: *Closure, args: []const ast.Expression) !Value {
+    // Evaluate arguments
+    var arg_vals = std.ArrayList(Value).init(env.allocator);
+    defer arg_vals.deinit();
+    for (args) |arg_expr| {
+        try arg_vals.append(try eval_expression(env, ctx, arg_expr));
+    }
+    return callClosureWithArgs(env, ctx, cl, arg_vals.items);
+}
+
+/// Call a closure with pre-evaluated Value arguments (used by array higher-order methods)
+fn callClosureWithArgs(env: *Environment, ctx: *RuntimeCtx, cl: *Closure, args: []const Value) !Value {
+    // Create method environment from captured environment
+    var closure_env = try cl.captured_env.clone();
+    for (cl.params, 0..) |param, i| {
+        if (i < args.len) {
+            try closure_env.set(param.name, args[i]);
+        }
+    }
+    ctx.return_value = null;
+    var local_threads = std.ArrayList(std.Thread).init(env.allocator);
+    const result = execute_statement(&closure_env, ctx, cl.body.*, &local_threads);
+    for (local_threads.items) |t| t.join();
+    closure_env.deinit();
+    _ = result catch |err| switch (err) {
+        error.ReturnSignal => {},
+        else => return err,
+    };
+    const return_val = ctx.return_value orelse Value.void;
+    ctx.return_value = null;
+    return return_val;
 }
 
 /// Evaluate a static method call: ClassName.method(args)
@@ -1270,6 +1426,7 @@ fn printValue(val: Value, newline: bool) !void {
             if (newline) std.debug.print("}}\n", .{}) else std.debug.print("}}", .{});
         },
         .object => if (newline) std.debug.print("<{s} object>\n", .{val.object.class_name}) else std.debug.print("<{s} object>", .{val.object.class_name}),
+        .closure => if (newline) std.debug.print("<closure>\n", .{}) else std.debug.print("<closure>", .{}),
         .null_val => if (newline) std.debug.print("null\n", .{}) else std.debug.print("null", .{}),
         .void => {},
     }

@@ -6,6 +6,7 @@ pub const Type = union(enum) {
     string,
     bool,
     float,
+    fn_ref,
     chan: *Type,
     array: *Type,
     map: struct {
@@ -65,6 +66,10 @@ pub const Expression = union(enum) {
         object: *Expression,
         method: []const u8,
         args: []const Expression,
+    },
+    lambda: struct {
+        params: []const Param,
+        body: *Statement,
     },
     this_ref,
 };

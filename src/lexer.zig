@@ -35,6 +35,7 @@ pub const TokenType = enum {
     keyword_finally,
     keyword_throw,
     keyword_import,
+    keyword_fn,
 
     plus,
     minus,
@@ -123,6 +124,7 @@ pub const Lexer = struct {
         .{ "finally", .keyword_finally },
         .{ "throw", .keyword_throw },
         .{ "import", .keyword_import },
+        .{ "fn", .keyword_fn },
     });
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Lexer {
