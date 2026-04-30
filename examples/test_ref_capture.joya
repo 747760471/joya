@@ -1,0 +1,64 @@
+class Main {
+    void main() {
+        // Test 1: Basic reference capture — closure modifies outer variable
+        int counter = 0;
+        fn increment = fn() { counter++; };
+        increment();
+        increment();
+        increment();
+        println(counter);  // Expected: 3
+
+        // Test 2: Closure reads and writes shared variable
+        int total = 0;
+        fn add = fn(int x) { total += x; };
+        add(10);
+        add(20);
+        add(30);
+        println(total);  // Expected: 60
+
+        // Test 3: Multiple closures share the same reference
+        int shared = 100;
+        fn getter = fn() { return shared; };
+        fn setter = fn(int v) { shared = v; };
+        println(getter());  // Expected: 100
+        setter(42);
+        println(getter());  // Expected: 42
+        println(shared);    // Expected: 42
+
+        // Test 4: Closure captures string and modifies it
+        string msg = "hello";
+        fn append = fn(string s) { msg += s; };
+        append(" world");
+        println(msg);  // Expected: hello world
+
+        // Test 5: Nested closures share references
+        int x = 0;
+        fn outer = fn() {
+            x += 10;
+            fn inner = fn() { x += 5; };
+            inner();
+        };
+        outer();
+        println(x);  // Expected: 15
+
+        // Test 6: Closure in array forEach modifies outer state
+        int sum = 0;
+        int[] nums = [1, 2, 3, 4, 5];
+        nums.forEach(fn(int n) { sum += n; });
+        println(sum);  // Expected: 15
+
+        // Test 7: makeCounter — method returning a closure
+        fn c1 = makeCounter(0);
+        fn c2 = makeCounter(100);
+        println(c1(1));   // Expected: 1
+        println(c1(1));   // Expected: 2
+        println(c1(10));  // Expected: 12
+        println(c2(1));   // Expected: 101
+        println(c2(-1));  // Expected: 100
+    }
+
+    fn makeCounter(int start) {
+        int count = start;
+        return fn(int delta) { count += delta; return count; };
+    }
+}

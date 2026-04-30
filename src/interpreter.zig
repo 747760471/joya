@@ -13,6 +13,7 @@ pub const Value = union(enum) {
     map: *JoyaMap,
     object: *JoyaObject,
     closure: *Closure,
+    ref_cell: *RefCell,
     null_val,
     void,
 };
@@ -60,6 +61,11 @@ pub const Closure = struct {
         self.captured_env.deinit();
         self.allocator.destroy(self);
     }
+};
+
+/// Reference cell for closure reference capture: shared mutable box holding a Value
+pub const RefCell = struct {
+    value: Value,
 };
 
 pub const JoyaArray = struct {
@@ -314,11 +320,32 @@ const Environment = struct {
         self.vars.deinit();
     }
 
+    /// Set a variable: if the existing binding is a ref_cell, update the cell's value (reference write-back)
     pub fn set(self: *Environment, name: []const u8, val: Value) !void {
+        // Check if the current binding is a ref_cell — write through the reference
+        if (self.vars.get(name)) |existing| {
+            if (existing == .ref_cell) {
+                existing.ref_cell.value = val;
+                return;
+            }
+        }
         try self.vars.put(name, val);
     }
 
+    /// Get a variable: automatically dereference ref_cell to get the actual value
     pub fn get(self: *Environment, name: []const u8) ?Value {
+        const raw = self.vars.get(name) orelse return null;
+        if (raw == .ref_cell) return raw.ref_cell.value;
+        return raw;
+    }
+
+    /// Define a variable as a reference cell (for closure capture)
+    pub fn defineRef(self: *Environment, name: []const u8, cell: *RefCell) !void {
+        try self.vars.put(name, Value{ .ref_cell = cell });
+    }
+
+    /// Get the raw Value (may be ref_cell) — used internally for reference checking
+    pub fn getRaw(self: *Environment, name: []const u8) ?Value {
         return self.vars.get(name);
     }
 
@@ -341,6 +368,7 @@ const RuntimeCtx = struct {
     maps: std.ArrayList(*JoyaMap),
     objects: std.ArrayList(*JoyaObject),
     closures: std.ArrayList(*Closure),
+    ref_cells: std.ArrayList(*RefCell),
     heap_strings: std.ArrayList([]const u8),
     program: ?*const ast.Program,
     return_value: ?Value,
@@ -355,6 +383,7 @@ const RuntimeCtx = struct {
             .maps = std.ArrayList(*JoyaMap).init(allocator),
             .objects = std.ArrayList(*JoyaObject).init(allocator),
             .closures = std.ArrayList(*Closure).init(allocator),
+            .ref_cells = std.ArrayList(*RefCell).init(allocator),
             .heap_strings = std.ArrayList([]const u8).init(allocator),
             .program = null,
             .return_value = null,
@@ -373,6 +402,8 @@ const RuntimeCtx = struct {
         self.objects.deinit();
         for (self.closures.items) |cl| cl.deinit();
         self.closures.deinit();
+        for (self.ref_cells.items) |rc| self.allocator.destroy(rc);
+        self.ref_cells.deinit();
         for (self.heap_strings.items) |s| self.allocator.free(s);
         self.heap_strings.deinit();
     }
@@ -405,6 +436,15 @@ const RuntimeCtx = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.closures.append(cl);
+    }
+
+    pub fn createRefCell(self: *RuntimeCtx, val: Value) !*RefCell {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const cell = try self.allocator.create(RefCell);
+        cell.* = .{ .value = val };
+        try self.ref_cells.append(cell);
+        return cell;
     }
 
     pub fn trackString(self: *RuntimeCtx, s: []const u8) !void {
@@ -741,9 +781,23 @@ fn eval_expression(env: *Environment, ctx: *RuntimeCtx, expr: ast.Expression) !V
             return error.InvalidOperation;
         },
         .lambda => |lam| {
-            // Capture current environment by cloning
-            const captured = try env.clone();
-            const cl = try Closure.init(env.allocator, lam.params, lam.body, captured);
+            // Reference capture: create RefCells shared between outer and closure environments
+            var closure_env = Environment.init(env.allocator);
+            var iter = env.vars.iterator();
+            while (iter.next()) |entry| {
+                const name = entry.key_ptr.*;
+                const raw = entry.value_ptr.*;
+                if (raw == .ref_cell) {
+                    // Already a ref_cell — share it
+                    try closure_env.defineRef(name, raw.ref_cell);
+                } else {
+                    // Create a new RefCell and rebind in both environments
+                    const cell = try ctx.createRefCell(raw);
+                    try env.defineRef(name, cell);
+                    try closure_env.defineRef(name, cell);
+                }
+            }
+            const cl = try Closure.init(env.allocator, lam.params, lam.body, closure_env);
             try ctx.trackClosure(cl);
             return Value{ .closure = cl };
         },
@@ -1302,11 +1356,12 @@ fn evalClosureCall(env: *Environment, ctx: *RuntimeCtx, cl: *Closure, args: []co
 
 /// Call a closure with pre-evaluated Value arguments (used by array higher-order methods)
 fn callClosureWithArgs(env: *Environment, ctx: *RuntimeCtx, cl: *Closure, args: []const Value) !Value {
-    // Create method environment from captured environment
+    // Create method environment from captured environment (clone shares ref_cell pointers)
     var closure_env = try cl.captured_env.clone();
+    // Bind parameters as new local variables (use put directly to override any captured binding)
     for (cl.params, 0..) |param, i| {
         if (i < args.len) {
-            try closure_env.set(param.name, args[i]);
+            try closure_env.vars.put(param.name, args[i]);
         }
     }
     ctx.return_value = null;
@@ -1427,6 +1482,10 @@ fn printValue(val: Value, newline: bool) !void {
         },
         .object => if (newline) std.debug.print("<{s} object>\n", .{val.object.class_name}) else std.debug.print("<{s} object>", .{val.object.class_name}),
         .closure => if (newline) std.debug.print("<closure>\n", .{}) else std.debug.print("<closure>", .{}),
+        .ref_cell => {
+            // Dereference and print the inner value
+            try printValue(val.ref_cell.value, newline);
+        },
         .null_val => if (newline) std.debug.print("null\n", .{}) else std.debug.print("null", .{}),
         .void => {},
     }

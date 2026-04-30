@@ -580,6 +580,41 @@ pub const Parser = struct {
     fn parseVarDecl(self: *Parser) anyerror!ast.Statement {
         const typ = try self.parseType();
         const name_tok = try self.parseName();
+
+        // If type is fn_ref and name is followed by '(', this is a named lambda declaration
+        // fn methodName(params) { body } → var_decl with lambda init
+        if (typ == .fn_ref and self.check(.l_paren)) {
+            _ = try self.expect(.l_paren);
+            var params = std.ArrayList(ast.Param).init(self.allocator);
+            if (!self.check(.r_paren)) {
+                const param_type = try self.parseType();
+                const param_name = try self.parseName();
+                try params.append(.{ .typ = param_type, .name = param_name.value });
+                while (self.check(.comma)) {
+                    _ = self.advance();
+                    const pt = try self.parseType();
+                    const pn = try self.parseName();
+                    try params.append(.{ .typ = pt, .name = pn.value });
+                }
+            }
+            _ = try self.expect(.r_paren);
+            const body = try self.parseBlock();
+            _ = self.match(.semicolon); // optional semicolon after method body
+
+            const body_ptr = try self.allocator.create(ast.Statement);
+            body_ptr.* = body;
+
+            return ast.Statement{
+                .var_decl = .{
+                    .typ = typ,
+                    .name = name_tok.value,
+                    .init = ast.Expression{
+                        .lambda = .{ .params = try params.toOwnedSlice(), .body = body_ptr },
+                    },
+                },
+            };
+        }
+
         var init_expr: ?ast.Expression = null;
         if (self.check(.eq)) {
             _ = self.advance();
