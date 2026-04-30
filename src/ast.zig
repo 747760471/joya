@@ -7,6 +7,7 @@ pub const Type = union(enum) {
     bool,
     float,
     fn_ref,
+    type_param: []const u8,
     chan: *Type,
     array: *Type,
     map: struct {
@@ -146,6 +147,7 @@ pub const FieldDecl = struct {
 pub const Method = struct {
     name: []const u8,
     return_type: Type,
+    type_params: []const []const u8,
     params: []const Param,
     body: Statement,
 };

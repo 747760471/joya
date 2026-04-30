@@ -1,0 +1,80 @@
+class Utils {
+    // Generic method: identity
+    static <T> T identity(T x) {
+        return x;
+    }
+
+    // Generic method: max (works with int and float)
+    static <T> T max(T a, T b) {
+        if (a > b) { return a; }
+        return b;
+    }
+
+    // Generic method: swap via array
+    static <T> T[] swap(T[] arr, int i, int j) {
+        T tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+        return arr;
+    }
+
+    // Generic method with two type params
+    static <K, V> string formatPair(K key, V value) {
+        return key;
+    }
+
+    // Generic method: first element
+    static <T> T first(T[] arr) {
+        return arr[0];
+    }
+
+    // Generic method: contains
+    static <T> bool contains(T[] arr, T target) {
+        for (T item : arr) {
+            if (item == target) { return true; }
+        }
+        return false;
+    }
+}
+
+class Main {
+    void main() {
+        // Test 1: identity with int
+        println(Utils.identity(42));        // 42
+
+        // Test 2: identity with string
+        println(Utils.identity("hello"));   // hello
+
+        // Test 3: identity with bool
+        println(Utils.identity(true));      // true
+
+        // Test 4: max with int
+        println(Utils.max(10, 20));         // 20
+
+        // Test 5: max with float
+        println(Utils.max(3.14, 2.71));     // 3.14
+
+        // Test 6: swap
+        int[] nums = [10, 20, 30];
+        Utils.swap(nums, 0, 2);
+        println(nums);                      // [30, 20, 10]
+
+        // Test 7: first element
+        string[] names = ["Alice", "Bob", "Charlie"];
+        println(Utils.first(names));        // Alice
+
+        // Test 8: contains
+        println(Utils.contains(nums, 20));  // true
+        println(Utils.contains(nums, 99));  // false
+
+        // Test 9: Generic named lambda in method
+        fn <T> T doubleIt(T x) { return x + x; }
+        println(doubleIt(5));               // 10
+        println(doubleIt("ha"));            // haha
+
+        // Test 10: Generic closure with array map
+        int[] values = [1, 2, 3];
+        int[] doubled = values.map(fn(int x) { return x * 2; });
+        println(doubled);                   // [2, 4, 6]
+    }
+}

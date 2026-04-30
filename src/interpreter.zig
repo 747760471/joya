@@ -104,6 +104,7 @@ pub const JoyaArray = struct {
             .string => Value{ .string = "" },
             .bool => Value{ .bool = false },
             .fn_ref => Value{ .null_val = {} },
+            .type_param => Value{ .null_val = {} },
             else => Value.void,
         };
     }

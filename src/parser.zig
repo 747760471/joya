@@ -110,6 +110,10 @@ pub const Parser = struct {
         // Class type: identifier used as type name
         if (self.check(.identifier)) {
             const name_tok = self.advance();
+            // Heuristic: short uppercase identifiers (T, K, V, R, etc.) are type parameters
+            if (name_tok.value.len <= 2 and name_tok.value[0] >= 'A' and name_tok.value[0] <= 'Z') {
+                return ast.Type{ .type_param = name_tok.value };
+            }
             return ast.Type{ .class_ref = name_tok.value };
         }
         const tok = self.peek();
@@ -547,6 +551,10 @@ pub const Parser = struct {
             _ = try self.expect(.semicolon);
             return ast.Statement{ .expr_stmt = expr };
         }
+        // Generic named lambda declaration: fn <T> methodName(T x) { body }
+        if (self.check(.keyword_fn) and self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].typ == .lt) {
+            return self.parseGenericLambdaDecl();
+        }
         if (self.isTypeStart()) return self.parseVarDecl();
         // Class-typed variable declaration: ClassName name = ...;
         // Lookahead: identifier followed by another identifier
@@ -765,8 +773,8 @@ pub const Parser = struct {
         _ = try self.expect(.l_paren);
 
         // Detect for-each: for (Type name : iterable) { ... }
-        // Lookahead: type keyword, then identifier, then colon
-        if (self.isTypeStart() and self.pos + 2 < self.tokens.len and
+        // Lookahead: type keyword or identifier (for type params like T), then identifier, then colon
+        if ((self.isTypeStart() or self.check(.identifier)) and self.pos + 2 < self.tokens.len and
             (self.tokens[self.pos + 1].typ == .identifier or self.tokens[self.pos + 1].typ == .keyword_main) and
             self.tokens[self.pos + 2].typ == .colon)
         {
@@ -1023,6 +1031,61 @@ pub const Parser = struct {
         };
     }
 
+    /// Parse generic named lambda declaration: fn <T, V> T methodName(T x, V y) { body }
+    fn parseGenericLambdaDecl(self: *Parser) anyerror!ast.Statement {
+        _ = try self.expect(.keyword_fn);
+
+        // Parse type parameters: <T, V, ...> (consumed for syntax, not stored in lambda)
+        _ = try self.expect(.lt);
+        if (self.check(.identifier)) {
+            _ = self.advance();
+            while (self.check(.comma)) {
+                _ = self.advance();
+                if (self.check(.identifier)) {
+                    _ = self.advance();
+                }
+            }
+        }
+        _ = try self.expect(.gt);
+
+        // Parse return type (consumed for syntax but lambda uses fn_ref type)
+        _ = try self.parseType();
+
+        // Parse method name (the lambda variable name)
+        const name_tok = try self.parseName();
+
+        // Parse parameters
+        _ = try self.expect(.l_paren);
+        var params = std.ArrayList(ast.Param).init(self.allocator);
+        if (!self.check(.r_paren)) {
+            const param_type = try self.parseType();
+            const param_name = try self.parseName();
+            try params.append(.{ .typ = param_type, .name = param_name.value });
+            while (self.check(.comma)) {
+                _ = self.advance();
+                const pt = try self.parseType();
+                const pn = try self.parseName();
+                try params.append(.{ .typ = pt, .name = pn.value });
+            }
+        }
+        _ = try self.expect(.r_paren);
+        const body = try self.parseBlock();
+        _ = self.match(.semicolon);
+
+        const body_ptr = try self.allocator.create(ast.Statement);
+        body_ptr.* = body;
+
+        return ast.Statement{
+            .var_decl = .{
+                .typ = ast.Type{ .fn_ref = {} },
+                .name = name_tok.value,
+                .init = ast.Expression{
+                    .lambda = .{ .params = try params.toOwnedSlice(), .body = body_ptr },
+                },
+            },
+        };
+    }
+
     // ---- Method / Class / Program parsing ----
 
     fn parseMethod(self: *Parser) anyerror!ast.Method {
@@ -1030,6 +1093,26 @@ pub const Parser = struct {
         while (self.check(.keyword_public) or self.check(.keyword_static)) {
             _ = self.advance();
         }
+
+        // Parse type parameters: <T, K, V, ...> (optional, before return type)
+        var type_params = std.ArrayList([]const u8).init(self.allocator);
+        if (self.check(.lt)) {
+            _ = self.advance(); // consume '<'
+            // First type param name
+            if (self.check(.identifier)) {
+                const tp = self.advance();
+                try type_params.append(tp.value);
+                while (self.check(.comma)) {
+                    _ = self.advance();
+                    if (self.check(.identifier)) {
+                        const tp2 = self.advance();
+                        try type_params.append(tp2.value);
+                    }
+                }
+            }
+            _ = try self.expect(.gt); // consume '>'
+        }
+
         const return_type = try self.parseType();
         const name_tok = try self.parseName();
 
@@ -1053,6 +1136,7 @@ pub const Parser = struct {
         return ast.Method{
             .name = name_tok.value,
             .return_type = return_type,
+            .type_params = try type_params.toOwnedSlice(),
             .params = try params.toOwnedSlice(),
             .body = body,
         };
