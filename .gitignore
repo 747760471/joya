@@ -18,6 +18,9 @@ zig-out/
 *.swo
 *~
 
+# LLVM headers (download from GitHub on demand)
+llvm-c/
+
 # OS files
 .DS_Store
 Thumbs.db

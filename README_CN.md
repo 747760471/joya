@@ -14,7 +14,7 @@ Joya 是一门系统级编程语言，旨在融合 Java 熟悉的面向对象语
 |---|---|---|---|
 | 语法 | 繁琐，强 OOP | 简洁，类 C | **Java 风格的类与方法** |
 | 并发 | 线程、锁、CompletableFuture | goroutine + channel | **go {} + chan\<T\>** |
-| 性能 | JVM 开销 | 原生，快 | **原生执行（LLVM，计划中）** |
+| 性能 | JVM 开销 | 原生，快 | **原生执行（LLVM 后端 ✅）** |
 | 调度器 | OS 线程（每个 ~1MB 栈） | M:N 协程 | **M:N 协程（Fiber 实现）** |
 | 跨平台 | JVM（跨平台） | 原生（跨平台） | **Windows / Linux / macOS** |
 | 错误处理 | try/catch/finally | defer + errors | **try/catch/finally + throw** |
@@ -31,7 +31,7 @@ Java 开发者不应该为了获得 goroutine 和 channel 而去学一套全新�
 - **跨平台** — 运行于 Windows、Linux、macOS。调度器自动适配各平台。
 - **丰富的标准操作** — 字符串方法、数组方法、字典、错误处理、复合赋值运算符。
 - **模块化** — `import` 跨文件组织代码，`lib/` 目录约定存放可复用模块。
-- **高性能** — 通过 LLVM 编译为独立原生可执行文件（计划中）。无运行时，无虚拟机。
+- **高性能** — 通过 LLVM 编译为独立原生可执行文件。无运行时，无虚拟机。
 - **安全** — 垃圾回收保证内存安全。无悬垂指针，无数据竞争。
 - **简洁** — 最少样板代码。`public static void main()` 即可开始。
 
@@ -102,6 +102,79 @@ M:N 协程调度器，支持跨平台 Fiber 上下文切换。
 | Chan 阻塞 | condvar（内核等待） | yield（用户态让出） |
 | 跨平台 | 全平台（OS 提供） | Windows / Linux / macOS |
 
+### 阶段三：LLVM 后端 — 进行中
+
+通过 LLVM C API（LLVM 20.1.0，opaque pointer 模式）将 Joya 程序编译为原生可执行文件。
+
+| 功能 | 状态 |
+|------|------|
+| **LLVM 环境** — LLVM 20.1.0 安装、C API 头文件、build.zig 链接 | ✅ |
+| **CLI 参数** — `--compile <output.o>`、`--emit-ir <output.ll>`、`--target <triple>` | ✅ |
+| **C 运行时** — `main()` 入口、`__chkstk` 栈探测（Windows） | ✅ |
+| **类型映射** — int→i64, float→f64, bool→i1, string→ptr, void→void | ✅ |
+| **字面量** — int、float、bool、string、null | ✅ |
+| **算术运算** — +, -, *, /, %（整数） | ✅ |
+| **比较运算** — <, >, <=, >=, ==, !=（ICmp） | ✅ |
+| **布尔逻辑** — &&, \|\|（短路求值 + phi 节点）、!（Not） | ✅ |
+| **控制流** — if/else、while、for、return、print/println | ✅ |
+| **变量** — var_decl、assign、alloca + store/load | ✅ |
+| **方法** — 静态与实例方法、名称 mangle、参数绑定 | ✅ |
+| **方法调用** — 静态 `ClassName.method()`、实例 `obj.method()` | ✅ |
+| **类** — LLVM 结构体类型、`new ClassName()`、malloc + 零初始化 | ✅ |
+| **字段** — `this.field` 读写（GEP）、`obj.field` 读取 | ✅ |
+| **构造函数** — `void ClassName(args)` 在 malloc 后调用 | ✅ |
+| **浮点算术** — FAdd/FSub/FMul/FDiv/FCmp、int↔float 转换 | 📋 计划中 |
+| **字符串拼接** — 运行时 `strcat`/`sprintf` | 📋 计划中 |
+| **数组与字符串** — C 运行时 JoyaArray/JoyaString | 📋 计划中 |
+| **Map + Chan + 协程** — 运行时哈希表、互斥锁+队列、线程 | 📋 计划中 |
+| **闭包 + 错误处理** — 闭包结构体、setjmp/longjmp | 📋 计划中 |
+| **import + 多文件** — 跨模块链接 | 📋 计划中 |
+
+#### LLVM 后端架构
+
+```
+.joya 源码 → 词法分析 → 语法分析 → AST → 编译器（LLVM C API）→ LLVM IR → .o → .exe
+                                                       ↓
+                                            TargetMachine（原生/x86_64/aarch64）
+```
+
+- **编译器**（`src/compiler.zig`）：~1360 行，手动声明约 80 个 LLVM C API extern 函数
+- **内存管理**：ArenaAllocator 管理所有编译器临时分配 — 零泄漏
+- **类编译**：`declareClassTypes()` 创建命名结构体类型；`current_class_name` 跟踪编译上下文
+- **LLVM 20 opaque pointer**：所有对象指针使用 `ptr`；结构体类型仅用于 GEP 字段访问
+- **链接**：`zig cc output.o src/joya_runtime.c -o output.exe`
+
+#### 编译示例
+
+```bash
+# 编译为原生可执行文件
+joya program.joya --compile output.o
+zig cc output.o src/joya_runtime.c -o program.exe
+./program.exe
+
+# 输出 LLVM IR 用于调试
+joya program.joya --emit-ir output.ll
+```
+
+#### 生成的 IR 示例（Point 类）
+
+```llvm
+%Point = type { i64, i64 }
+
+define void @Point_Point(ptr %0, i64 %1, i64 %2) {
+  store ptr %0, ptr %this
+  %field_ptr = getelementptr %Point, ptr %this_val, i32 0, i32 0
+  store i64 %1, ptr %field_ptr
+  ret void
+}
+
+define i64 @Point_getX(ptr %0) {
+  %field_ptr = getelementptr %Point, ptr %this1, i32 0, i32 0
+  %x = load i64, ptr %field_ptr
+  ret i64 %x
+}
+```
+
 ### 路线图
 
 | 阶段 | 目标 | 状态 |
@@ -110,7 +183,7 @@ M:N 协程调度器，支持跨平台 Fiber 上下文切换。
 | **2** | 用户态协程调度器（M:N，Fiber 实现） | ✅ 已完成 |
 | **2.5** | 跨平台 Fiber 抽象层（Windows/Linux/macOS） | ✅ 已完成 |
 | **2.6** | 语言特性：字典、错误处理、import、复合赋值 | ✅ 已完成 |
-| **3** | LLVM 后端 — 编译为原生可执行文件 | 🔜 下一阶段 |
+| **3** | LLVM 后端 — 编译为原生可执行文件 | 🔄 进行中 |
 | **4** | 自举 — 用 Joya 重写编译器 | 📋 计划中 |
 
 ---
@@ -302,19 +375,43 @@ public class Main {
 
 ## 🛠️ 构建与运行
 
-### Windows
+### 解释器模式
 
 ```bash
 zig build
-zig-out\bin\joya.exe examples\hello.joya
+zig-out\bin\joya.exe examples\hello.joya    # Windows
+./zig-out/bin/joya examples/hello.joya       # Linux/macOS
 ```
 
-### Linux / macOS
+### LLVM 编译模式（原生可执行文件）
+
+> **前置条件：** 已安装 LLVM 20+（运行时需要 `LLVM-C.dll`/`libLLVM-C.so`，链接时需要 `LLVM-C.lib`）
 
 ```bash
 zig build
-./zig-out/bin/joya examples/hello.joya
+
+# 步骤 1：编译 .joya → .o（需要 LLVM-C.dll 在 PATH 中）
+set PATH=C:\Program Files\LLVM\bin;%PATH%     # Windows
+zig-out\bin\joya.exe examples\class_test.joya --compile output.o
+
+# 步骤 2：链接 .o + 运行时 → .exe
+zig cc output.o src\joya_runtime.c -o output.exe
+
+# 步骤 3：运行
+output.exe
 ```
+
+#### CLI 参数
+
+```
+joya <file.joya> [--compile <output.o>] [--emit-ir <output.ll>] [--target <triple>]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--compile <path>` | 编译为原生目标文件（.o） |
+| `--emit-ir <path>` | 输出 LLVM IR 文本（.ll）用于调试 |
+| `--target <triple>` | 目标三元组（默认：本机） |
 
 ### 交叉编译
 
@@ -333,16 +430,19 @@ zig build -Dtarget=aarch64-macos    # macOS Apple Silicon
 
 ```
 joya/
-├── build.zig              # Zig 构建配置（条件编译 C 文件）
+├── build.zig              # Zig 构建配置（LLVM 链接 + 条件编译 C 文件）
 ├── README.md              # 英文说明
 ├── README_CN.md           # 中文说明
 ├── joya.md                # 语言规范文档
 ├── 修改记录.md             # 开发修改记录
+├── llvm-c/                # LLVM C API 头文件（27 个 .h 文件，来自 LLVM 20.1.0）
 ├── src/
-│   ├── main.zig           # 程序入口 + import 系统
+│   ├── main.zig           # 程序入口 + import 系统 + CLI 参数
 │   ├── lexer.zig          # 词法分析器（32+ 关键字）
 │   ├── ast.zig            # AST 结构定义
 │   ├── parser.zig         # 递归下降解析器（优先级爬升法）
+│   ├── compiler.zig       # LLVM 后端编译器（~1360 行，~80 个 extern 声明）
+│   ├── joya_runtime.c     # C 运行时（main 入口、Windows __chkstk）
 │   ├── fiber.zig          # 跨平台 Fiber 抽象层（comptime 选择后端）
 │   ├── fiber_windows.zig  # Windows Fiber 后端（Win32 API）
 │   ├── fiber_ucontext.zig # Linux/macOS Fiber 后端（汇编上下文切换）
@@ -352,6 +452,8 @@ joya/
 │   └── interpreter.zig    # 解释器核心（对象、数组、通道、字典、错误处理）
 └── examples/
     ├── hello.joya         # 协程与通道示例
+    ├── compiler_test.joya # LLVM 后端测试（int 算术 + if/else + while + print）
+    ├── class_test.joya    # LLVM 后端类测试（Point 类 + 字段 + 方法）
     ├── features.joya      # 特性展示
     ├── demo_sort.joya     # 并发排序 Demo
     ├── stress_test.joya   # 1000 协程压力测试

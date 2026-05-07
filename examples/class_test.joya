@@ -1,0 +1,36 @@
+class Point {
+    int x;
+    int y;
+
+    void Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    int getX() {
+        return this.x;
+    }
+
+    int getY() {
+        return this.y;
+    }
+
+    int sum() {
+        return this.x + this.y;
+    }
+}
+
+class Hello {
+    static int main() {
+        Point p = new Point(10, 20);
+        println(p.getX());
+        println(p.getY());
+        println(p.sum());
+
+        Point p2 = new Point(100, 200);
+        println(p2.getX());
+        println(p2.sum());
+
+        return 0;
+    }
+}

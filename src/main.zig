@@ -3,6 +3,7 @@ const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const ast = @import("ast.zig");
 const interpreter = @import("interpreter.zig");
+const compiler = @import("compiler.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -13,14 +14,35 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) {
-        std.debug.print("Usage: joya <file.joya>\n", .{});
+        std.debug.print("Usage: joya <file.joya> [--compile <output.o>] [--emit-ir <output.ll>] [--target <triple>]\n", .{});
         return;
     }
 
     const file_path = args[1];
+
+    // Parse CLI flags
+    var compile_output: ?[]const u8 = null;
+    var emit_ir_output: ?[]const u8 = null;
+    var target_triple: ?[]const u8 = null;
+
+    var i: usize = 2;
+    while (i < args.len) {
+        if (std.mem.eql(u8, args[i], "--compile")) {
+            i += 1;
+            if (i < args.len) compile_output = args[i];
+        } else if (std.mem.eql(u8, args[i], "--emit-ir")) {
+            i += 1;
+            if (i < args.len) emit_ir_output = args[i];
+        } else if (std.mem.eql(u8, args[i], "--target")) {
+            i += 1;
+            if (i < args.len) target_triple = args[i];
+        }
+        i += 1;
+    }
+
     std.debug.print("=== Joya: reading {s} ===\n", .{file_path});
 
-    // Parse arena — freed after interpreter runs
+    // Parse arena — freed after program runs
     var parser_arena = std.heap.ArenaAllocator.init(allocator);
     defer parser_arena.deinit();
     const arena = parser_arena.allocator();
@@ -33,8 +55,7 @@ pub fn main() !void {
     var imported = std.StringHashMap(void).init(arena);
     defer imported.deinit();
 
-    // Collect imported source buffers — freed after interpreter runs
-    // (tokens reference slices of these buffers, so we can't free them earlier)
+    // Collect imported source buffers — freed after program runs
     var import_sources = std.ArrayList([]const u8).init(allocator);
     defer {
         for (import_sources.items) |src| allocator.free(src);
@@ -54,28 +75,27 @@ pub fn main() !void {
     var import_names = std.ArrayList([]const u8).init(arena);
     defer import_names.deinit();
 
-    var i: usize = 0;
+    var ti: usize = 0;
     const tokens = main_lex.tokens.items;
-    while (i < tokens.len) {
-        if (tokens[i].typ == .keyword_import) {
-            i += 1; // skip 'import'
-            if (i < tokens.len and tokens[i].typ == .identifier) {
-                try import_names.append(tokens[i].value);
-                i += 1; // skip module name
-                if (i < tokens.len and tokens[i].typ == .semicolon) {
-                    i += 1; // skip ;
+    while (ti < tokens.len) {
+        if (tokens[ti].typ == .keyword_import) {
+            ti += 1;
+            if (ti < tokens.len and tokens[ti].typ == .identifier) {
+                try import_names.append(tokens[ti].value);
+                ti += 1;
+                if (ti < tokens.len and tokens[ti].typ == .semicolon) {
+                    ti += 1;
                 }
             }
         } else {
-            i += 1;
+            ti += 1;
         }
     }
 
-    // Parse imports first (they define classes that the main file uses)
+    // Parse imports first
     const base_dir = try extractDirectory(allocator, file_path);
     defer allocator.free(base_dir);
 
-    // Search paths: base_dir, base_dir + "lib/"
     var search_paths = std.ArrayList([]const u8).init(arena);
     try search_paths.append(base_dir);
     const lib_dir = try std.fmt.allocPrint(arena, "{s}lib/", .{base_dir});
@@ -94,13 +114,26 @@ pub fn main() !void {
         try all_classes.append(class);
     }
 
-    std.debug.print("Parsed {} classes (from {} files), running interpreter...\n", .{ all_classes.items.len, 1 + imported.count() });
-
-    // Run interpreter with all merged classes
     const program = ast.Program{ .classes = try all_classes.toOwnedSlice() };
-    try interpreter.run(allocator, program);
 
-    // import_sources freed via defer above
+    // Compile mode
+    if (compile_output) |output| {
+        std.debug.print("Compiling to object file: {s}\n", .{output});
+        try compiler.compileToObject(allocator, &program, output, target_triple);
+        std.debug.print("Compilation successful!\n", .{});
+        return;
+    }
+
+    if (emit_ir_output) |output| {
+        std.debug.print("Emitting LLVM IR to: {s}\n", .{output});
+        try compiler.compileToIR(allocator, &program, output, target_triple);
+        std.debug.print("IR emission successful!\n", .{});
+        return;
+    }
+
+    // Default: interpret mode
+    std.debug.print("Parsed {} classes (from {} files), running interpreter...\n", .{ all_classes.items.len, 1 + imported.count() });
+    try interpreter.run(allocator, program);
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {

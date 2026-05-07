@@ -14,7 +14,7 @@ Joya is a systems programming language that bridges the gap between Java's famil
 |---|---|---|---|
 | Syntax | Verbose, OOP-heavy | Simple, C-like | **Java-style classes & methods** |
 | Concurrency | Threads, locks, CompletableFuture | goroutines + channels | **go {} + chan\<T\>** |
-| Performance | JVM overhead | Native, fast | **Native (LLVM, planned)** |
+| Performance | JVM overhead | Native, fast | **Native (LLVM backend ✅)** |
 | Scheduler | OS threads (~1MB stack each) | M:N goroutines | **M:N goroutines (Fiber-based)** |
 | Platforms | JVM (cross-platform) | Native (cross-platform) | **Windows / Linux / macOS** |
 | Error handling | try/catch/finally | defer + errors | **try/catch/finally + throw** |
@@ -31,7 +31,7 @@ Java developers shouldn't have to learn a completely new syntax just to get goro
 - **Cross-platform** — Runs on Windows, Linux, and macOS. The scheduler adapts to each platform automatically.
 - **Rich standard operations** — String methods, array methods, maps, error handling, compound assignment operators.
 - **Modular** — `import` splits code across files. `lib/` directory convention for reusable modules.
-- **Fast** — Compiles to standalone native executables via LLVM (planned). No runtime, no VM.
+- **Fast** — Compiles to standalone native executables via LLVM. No runtime, no VM.
 - **Safe** — Memory-safe with garbage collection. No use-after-free, no data races.
 - **Simple** — Minimal boilerplate. `public static void main()` is all you need to start.
 
@@ -102,6 +102,81 @@ The cross-platform abstraction is achieved via `fiber.zig`, which selects the ba
 | Chan blocking | condvar (kernel wait) | yield (user-space) |
 | Platform support | All (OS-provided) | Windows / Linux / macOS |
 
+### Phase 3: LLVM Backend — In Progress
+
+Compile Joya programs to native executables via LLVM C API (LLVM 20.1.0, opaque pointers).
+
+| Feature | Status |
+|---------|--------|
+| **LLVM environment** — LLVM 20.1.0 install, C API headers, build.zig linking | ✅ |
+| **CLI flags** — `--compile <output.o>`, `--emit-ir <output.ll>`, `--target <triple>` | ✅ |
+| **C runtime** — `main()` entry, `__chkstk` stub (Windows) | ✅ |
+| **Type mapping** — int→i64, float→f64, bool→i1, string→ptr, void→void | ✅ |
+| **Literals** — int, float, bool, string, null | ✅ |
+| **Arithmetic** — +, -, *, /, % (integer) | ✅ |
+| **Comparison** — <, >, <=, >=, ==, != (ICmp) | ✅ |
+| **Boolean logic** — &&, \|\| (short-circuit + phi), ! (Not) | ✅ |
+| **Control flow** — if/else, while, for, return, print/println | ✅ |
+| **Variables** — var_decl, assign, alloca + store/load | ✅ |
+| **Methods** — static & instance, name mangling, parameter binding | ✅ |
+| **Method calls** — static `ClassName.method()`, instance `obj.method()` | ✅ |
+| **Classes** — LLVM struct types, `new ClassName()`, malloc + zero-init | ✅ |
+| **Fields** — `this.field` read/write via GEP, `obj.field` read | ✅ |
+| **Constructors** — `void ClassName(args)` called after malloc | ✅ |
+| **Float arithmetic** — FAdd/FSub/FMul/FDiv/FCmp, int↔float casts | 📋 Planned |
+| **String concatenation** — runtime `strcat`/`sprintf` | 📋 Planned |
+| **Arrays & strings** — C runtime for JoyaArray/JoyaString | 📋 Planned |
+| **Map + Chan + goroutines** — runtime hash table, mutex+queue, threads | 📋 Planned |
+| **Closures + error handling** — closure struct, setjmp/longjmp | 📋 Planned |
+| **Import + multi-file** — cross-module linking | 📋 Planned |
+
+#### LLVM Backend Architecture
+
+```
+.joya source → Lexer → Parser → AST → Compiler (LLVM C API) → LLVM IR → .o → .exe
+                                                         ↓
+                                              TargetMachine (native/x86_64/aarch64)
+```
+
+- **Compiler** (`src/compiler.zig`): ~1360 lines, manual extern declarations for ~80 LLVM C API functions
+- **Memory**: ArenaAllocator for all compiler temps — zero leaks
+- **Class compilation**: `declareClassTypes()` creates named struct types; `current_class_name` tracks compilation context
+- **LLVM 20 opaque pointers**: All object pointers use `ptr`; struct types used only for GEP field access
+- **Linking**: `zig cc output.o src/joya_runtime.c -o output.exe`
+
+#### Compilation Example
+
+```bash
+# Compile to native executable
+joya program.joya --compile output.o
+zig cc output.o src/joya_runtime.c -o program.exe
+./program.exe
+
+# Emit LLVM IR for debugging
+joya program.joya --emit-ir output.ll
+```
+
+#### Generated IR Example (Point class)
+
+```llvm
+%Point = type { i64, i64 }
+
+define void @Point_Point(ptr %0, i64 %1, i64 %2) {
+  store ptr %0, ptr %this
+  %field_ptr = getelementptr %Point, ptr %this_val, i32 0, i32 0
+  store i64 %1, ptr %field_ptr
+  %field_ptr4 = getelementptr %Point, ptr %this_val, i32 0, i32 1
+  store i64 %2, ptr %field_ptr4
+  ret void
+}
+
+define i64 @Point_getX(ptr %0) {
+  %field_ptr = getelementptr %Point, ptr %this1, i32 0, i32 0
+  %x = load i64, ptr %field_ptr
+  ret i64 %x
+}
+```
+
 ### Roadmap
 
 | Phase | Goal | Status |
@@ -110,7 +185,7 @@ The cross-platform abstraction is achieved via `fiber.zig`, which selects the ba
 | **2** | User-space goroutine scheduler (M:N, Fiber-based) | ✅ Complete |
 | **2.5** | Cross-platform Fiber abstraction (Windows/Linux/macOS) | ✅ Complete |
 | **2.6** | Language features: maps, error handling, import, compound ops | ✅ Complete |
-| **3** | LLVM backend — compile to native executables | 🔜 Next |
+| **3** | LLVM backend — compile to native executables | 🔄 In Progress |
 | **4** | Self-hosting — rewrite compiler in Joya | 📋 Planned |
 
 ---
@@ -332,19 +407,43 @@ public class Main {
 
 ## 🛠️ Build & Run
 
-### Windows
+### Interpreter Mode
 
 ```bash
 zig build
-zig-out\bin\joya.exe examples\hello.joya
+zig-out\bin\joya.exe examples\hello.joya    # Windows
+./zig-out/bin/joya examples/hello.joya       # Linux/macOS
 ```
 
-### Linux / macOS
+### LLVM Compile Mode (Native Executable)
+
+> **Requirements:** LLVM 20+ installed (for `LLVM-C.dll`/`libLLVM-C.so` at runtime, and `LLVM-C.lib` at link time)
 
 ```bash
 zig build
-./zig-out/bin/joya examples/hello.joya
+
+# Step 1: Compile .joya → .o (requires LLVM-C.dll in PATH)
+set PATH=C:\Program Files\LLVM\bin;%PATH%     # Windows
+zig-out\bin\joya.exe examples/class_test.joya --compile output.o
+
+# Step 2: Link .o + runtime → .exe
+zig cc output.o src/joya_runtime.c -o output.exe
+
+# Step 3: Run
+output.exe
 ```
+
+#### CLI Flags
+
+```
+joya <file.joya> [--compile <output.o>] [--emit-ir <output.ll>] [--target <triple>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--compile <path>` | Compile to native object file (.o) |
+| `--emit-ir <path>` | Emit LLVM IR text (.ll) for debugging |
+| `--target <triple>` | Target triple (default: host native) |
 
 ### Cross-Compilation
 
@@ -363,16 +462,19 @@ zig build -Dtarget=aarch64-macos    # macOS Apple Silicon
 
 ```
 joya/
-├── build.zig              # Zig build config (conditional C compilation)
+├── build.zig              # Zig build config (LLVM linking + conditional C compilation)
 ├── README.md              # English readme
 ├── README_CN.md           # Chinese readme
 ├── joya.md                # Language specification
 ├── 修改记录.md             # Development changelog
+├── llvm-c/                # LLVM C API headers (27 .h files from LLVM 20.1.0)
 ├── src/
-│   ├── main.zig           # Entry point + import system
+│   ├── main.zig           # Entry point + import system + CLI flags
 │   ├── lexer.zig          # Lexer (32+ keywords)
 │   ├── ast.zig            # AST definitions
 │   ├── parser.zig         # Recursive descent parser (precedence climbing)
+│   ├── compiler.zig       # LLVM backend compiler (~1360 lines, ~80 extern decls)
+│   ├── joya_runtime.c     # C runtime (main entry, __chkstk for Windows)
 │   ├── fiber.zig          # Cross-platform Fiber abstraction (comptime backend selection)
 │   ├── fiber_windows.zig  # Windows Fiber backend (Win32 API)
 │   ├── fiber_ucontext.zig # Linux/macOS Fiber backend (asm context switching)
@@ -382,6 +484,8 @@ joya/
 │   └── interpreter.zig    # Interpreter (objects, arrays, channels, maps, error handling)
 └── examples/
     ├── hello.joya         # Goroutines & channels
+    ├── compiler_test.joya # LLVM backend test (int arithmetic + if/else + while + print)
+    ├── class_test.joya    # LLVM backend class test (Point class + fields + methods)
     ├── features.joya      # Feature showcase
     ├── demo_sort.joya     # Concurrent sorting demo
     ├── stress_test.joya   # 1000 goroutine stress test
